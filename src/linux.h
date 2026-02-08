@@ -1,0 +1,2 @@
+#define PROGRAM_EXIT_ERROR 1
+#define PROGRAM_EXIT_OK 0

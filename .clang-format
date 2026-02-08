@@ -1,0 +1,8 @@
+BreakBeforeBraces: Allman
+BinPackParameters: OnePerLine
+BinPackArguments: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Always
+AlignAfterOpenBracket: AlwaysBreak
+BreakBeforeBinaryOperators: NonAssignment
