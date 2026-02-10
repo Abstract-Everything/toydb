@@ -9,6 +9,8 @@
 
 #define ARRAY_LENGTH(a) (sizeof(a) / sizeof(*(a)))
 
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
 typedef int32_t bool32;
 const bool32 false = 0;
 const bool32 true = 1;
@@ -89,11 +91,12 @@ static void deallocate(void *memory, size_t length)
 }
 
 // TODO: Optimise
+// TODO Try using a macro to cover types
 static void
 memory_copy_forward(void *destination, const void *source, size_t length)
 {
   assert(destination != NULL);
-  assert(source != NULL);
+  assert(source != NULL || length == 0);
 
   for (size_t i = 0; i < length; ++i)
   {
@@ -104,11 +107,12 @@ memory_copy_forward(void *destination, const void *source, size_t length)
 }
 
 // TODO: Optimise
+// TODO Try using a macro to cover types
 static void
 memory_copy_backward(void *destination, const void *source, size_t length)
 {
   assert(destination != NULL);
-  assert(source != NULL);
+  assert(source != NULL || length == 0);
 
   for (int64_t i = 0; i < length; ++i)
   {
@@ -116,6 +120,31 @@ memory_copy_backward(void *destination, const void *source, size_t length)
     const uint8_t *s = source - i;
     *d = *s;
   }
+}
+
+// TODO: Use unsigned char instead of void
+static AllocateError
+reallocate(size_t object_size, void **memory, size_t *length, size_t new_length)
+{
+  assert(object_size > 0);
+  assert(memory != NULL);
+  assert(length != NULL);
+  assert(*memory == NULL || *length > 0);
+
+  void *new_memory = NULL;
+  if (allocate(&new_memory, object_size * new_length) == ALLOCATE_OUT_OF_MEMORY)
+  {
+    return ALLOCATE_OUT_OF_MEMORY;
+  }
+
+  memory_copy_forward(
+      new_memory, *memory, object_size * MIN(*length, new_length));
+
+  deallocate(*memory, object_size * *length);
+
+  *memory = new_memory;
+  *length = new_length;
+  return ALLOCATE_OK;
 }
 
 #define STD_H

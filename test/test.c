@@ -3,6 +3,11 @@
 
 #define USERS_TABLE_NAME "users"
 
+const ColumnType types[] = {
+    COLUMN_TYPE_INTEGER,
+    COLUMN_TYPE_STRING,
+};
+
 void create_table(Database *db)
 {
   const StringSlice names[] = {
@@ -10,24 +15,55 @@ void create_table(Database *db)
       string_slice_from_ptr("email"),
   };
 
-  const ColumnType types[] = {
-      COLUMN_TYPE_INTEGER,
-      COLUMN_TYPE_STRING,
-  };
-
   STATIC_ASSERT(ARRAY_LENGTH(names) == ARRAY_LENGTH(types));
 
-  database_create_table(
-      db,
-      string_slice_from_ptr(USERS_TABLE_NAME),
-      names,
-      types,
-      ARRAY_LENGTH(names));
+  assert(
+      database_create_table(
+          db,
+          string_slice_from_ptr(USERS_TABLE_NAME),
+          names,
+          types,
+          ARRAY_LENGTH(names))
+      == DATABASE_CREATE_TABLE_OK);
 }
 
 void drop_table(Database *db)
 {
   database_drop_table(db, string_slice_from_ptr(USERS_TABLE_NAME));
+}
+
+void insert_tuple(Database *db)
+{
+  const ColumnValue values[] = {
+      {.integer = 0},
+      {.string = string_slice_from_ptr("user@company")},
+  };
+  STATIC_ASSERT(ARRAY_LENGTH(types) == ARRAY_LENGTH(values));
+  assert(
+      database_insert_tuple(
+          db,
+          string_slice_from_ptr(USERS_TABLE_NAME),
+          types,
+          values,
+          ARRAY_LENGTH(types))
+      == DATABASE_INSERT_TUPLE_OK);
+}
+
+void delete_tuples(Database *db)
+{
+  const ColumnValue values[] = {
+      {.integer = 0},
+      {.string = string_slice_from_ptr("user@company")},
+  };
+  STATIC_ASSERT(ARRAY_LENGTH(types) == ARRAY_LENGTH(values));
+  assert(
+      database_delete_tuples(
+          db,
+          string_slice_from_ptr(USERS_TABLE_NAME),
+          0,
+          COLUMN_TYPE_INTEGER,
+          (ColumnValue){.integer = 0})
+      == DATABASE_DELETE_TUPLES_OK);
 }
 
 int main(int argc, char *argv[])
@@ -39,6 +75,10 @@ int main(int argc, char *argv[])
   }
 
   create_table(&db);
+
+  insert_tuple(&db);
+
+  delete_tuples(&db);
 
   drop_table(&db);
 }

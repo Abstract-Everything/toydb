@@ -194,7 +194,7 @@ static MemoryStoreInsertTupleError memory_store_insert_tuple(
     MemoryStore *store,
     const ColumnType *types,
     const ColumnValue *values,
-    int64_t length)
+    ColumnsLength length)
 {
   assert(store != NULL);
   assert(types != NULL);
@@ -219,7 +219,7 @@ static MemoryStoreInsertTupleError memory_store_insert_tuple(
       continue;
     }
 
-    for (int64_t column = 0; column < length; ++column)
+    for (ColumnsLength column = 0; column < length; ++column)
     {
       const size_t column_byte_offset =
           tuple_column_fixed_byte_offset(types, length, column);
