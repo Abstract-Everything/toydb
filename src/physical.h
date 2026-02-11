@@ -29,11 +29,26 @@ typedef enum
   COLUMN_TYPE_STRING,
 } ColumnType;
 
+typedef StoreInteger MemoryInteger;
+
+typedef struct
+{
+  size_t offset;
+  size_t length;
+} MemoryString;
+
 typedef union
 {
   StoreInteger integer;
   StringSlice string;
 } ColumnValue;
+
+// TODO: Merge this and ColumnValue
+typedef union
+{
+  MemoryInteger integer;
+  MemoryString string;
+} ColumnValue2;
 
 static size_t column_type_fixed_size(ColumnType type)
 {

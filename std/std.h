@@ -125,8 +125,8 @@ memory_copy_backward(void *destination, const void *source, size_t length)
 }
 
 // TODO: Use unsigned char instead of void
-static AllocateError
-reallocate(size_t object_size, void **memory, size_t *length, size_t new_length)
+static AllocateError reallocate_update_length(
+    size_t object_size, void **memory, size_t *length, size_t new_length)
 {
   assert(object_size > 0);
   assert(memory != NULL);
@@ -147,6 +147,12 @@ reallocate(size_t object_size, void **memory, size_t *length, size_t new_length)
   *memory = new_memory;
   *length = new_length;
   return ALLOCATE_OK;
+}
+
+static AllocateError
+reallocate(size_t object_size, void **memory, size_t length, size_t new_length)
+{
+  return reallocate_update_length(object_size, memory, &length, new_length);
 }
 
 #define STD_H

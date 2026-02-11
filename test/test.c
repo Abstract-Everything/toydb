@@ -1,7 +1,56 @@
 #include "linux.h"
 #include "logical.h"
 
+#include <stdio.h>
+
 #define USERS_TABLE_NAME "users"
+
+void relation_print(Relation relation)
+{
+  for (ColumnsLength i = 0; i < relation.tuple_length; ++i)
+  {
+    printf(
+        "%.*s",
+        (int)relation.names[i].length,
+        (char *)&relation.data[relation.names[i].offset]);
+    if (i < relation.tuple_length - 1)
+    {
+      printf(", ");
+    }
+  }
+
+  printf("\n---------\n");
+
+  for (size_t tuple_index = 0; tuple_index < relation.length; ++tuple_index)
+  {
+    ColumnValue2 *tuple =
+        (tuple_index * relation.tuple_length) + relation.values;
+
+    for (ColumnsLength column = 0; column < relation.tuple_length; ++column)
+    {
+      switch (relation.types[column])
+      {
+      case COLUMN_TYPE_INTEGER:
+        printf("%ld", tuple[column].integer);
+        break;
+
+      case COLUMN_TYPE_STRING:
+        printf(
+            "%.*s",
+            (int)tuple[column].string.length,
+            (char *)&relation.data[tuple[column].string.offset]);
+        break;
+      }
+
+      if (column < relation.tuple_length - 1)
+      {
+        printf(", ");
+      }
+    }
+
+    printf("\n");
+  }
+}
 
 const ColumnType types[] = {
     COLUMN_TYPE_INTEGER,
@@ -32,21 +81,60 @@ void drop_table(Database *db)
   database_drop_table(db, string_slice_from_ptr(USERS_TABLE_NAME));
 }
 
-void insert_tuple(Database *db)
+void insert_tuples(Database *db)
 {
-  const ColumnValue values[] = {
+  const ColumnValue values1[] = {
       {.integer = 0},
       {.string = string_slice_from_ptr("user@company")},
   };
-  STATIC_ASSERT(ARRAY_LENGTH(types) == ARRAY_LENGTH(values));
+  STATIC_ASSERT(ARRAY_LENGTH(types) == ARRAY_LENGTH(values1));
   assert(
       database_insert_tuple(
           db,
           string_slice_from_ptr(USERS_TABLE_NAME),
           types,
-          values,
+          values1,
           ARRAY_LENGTH(types))
       == DATABASE_INSERT_TUPLE_OK);
+
+  const ColumnValue values2[] = {
+      {.integer = 1},
+      {.string = string_slice_from_ptr("admin@company")},
+  };
+  STATIC_ASSERT(ARRAY_LENGTH(types) == ARRAY_LENGTH(values2));
+  assert(
+      database_insert_tuple(
+          db,
+          string_slice_from_ptr(USERS_TABLE_NAME),
+          types,
+          values2,
+          ARRAY_LENGTH(types))
+      == DATABASE_INSERT_TUPLE_OK);
+
+  const ColumnValue values3[] = {
+      {.integer = 2},
+      {.string = string_slice_from_ptr("guest@company")},
+  };
+  STATIC_ASSERT(ARRAY_LENGTH(types) == ARRAY_LENGTH(values3));
+  assert(
+      database_insert_tuple(
+          db,
+          string_slice_from_ptr(USERS_TABLE_NAME),
+          types,
+          values3,
+          ARRAY_LENGTH(types))
+      == DATABASE_INSERT_TUPLE_OK);
+}
+
+void dump_table(Database *db)
+{
+  Relation relation = {};
+  assert(
+      database_read_relation(
+          db, &relation, string_slice_from_ptr(USERS_TABLE_NAME))
+      == DATABASE_READ_RELATION_OK);
+  relation_print(relation);
+  relation_destroy(&relation);
 }
 
 void delete_tuples(Database *db)
@@ -79,7 +167,9 @@ int main(int argc, char *argv[])
 
   create_table(&db);
 
-  insert_tuple(&db);
+  insert_tuples(&db);
+
+  dump_table(&db);
 
   delete_tuples(&db);
 
