@@ -417,13 +417,10 @@ static DatabaseInsertTupleError database_insert_tuple(
 
   size_t relation_index = find_user_relation_index(*db, relation_id);
 
-  for (int64_t i = 0; i < length; ++i)
-  {
-    MemoryStoreInsertTupleError insert_error = memory_store_insert_tuple(
-        &db->user_relations[relation_index].store, types, values, length);
-    // TODO: Use transactions to handle failure
-    assert(insert_error == MEMORY_STORE_INSERT_TUPLE_OK);
-  }
+  MemoryStoreInsertTupleError insert_error = memory_store_insert_tuple(
+      &db->user_relations[relation_index].store, types, values, length);
+  // TODO: Use transactions to handle failure
+  assert(insert_error == MEMORY_STORE_INSERT_TUPLE_OK);
 
   return DATABASE_INSERT_TUPLE_OK;
 }
