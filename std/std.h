@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define UNUSED(v) (v == v)
+
 #define KIBIBYTES(v) ((v) * 1024)
 
 #define ARRAY_LENGTH(a) (sizeof(a) / sizeof(*(a)))

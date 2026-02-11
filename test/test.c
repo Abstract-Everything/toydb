@@ -68,6 +68,9 @@ void delete_tuples(Database *db)
 
 int main(int argc, char *argv[])
 {
+  UNUSED(argc);
+  UNUSED(argv);
+
   Database db = {};
   if (database_new(&db, 1, 1, 1) == ALLOCATE_OUT_OF_MEMORY)
   {
