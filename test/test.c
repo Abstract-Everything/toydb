@@ -7,6 +7,8 @@
 
 void relation_print(Relation relation)
 {
+  printf("\n\n");
+
   for (ColumnsLength i = 0; i < relation.tuple_length; ++i)
   {
     printf(
@@ -57,22 +59,27 @@ const ColumnType types[] = {
     COLUMN_TYPE_STRING,
 };
 
+const char *const names[] = {
+    "id",
+    "email",
+};
+
 void create_table(Database *db)
 {
-  const StringSlice names[] = {
-      string_slice_from_ptr("id"),
-      string_slice_from_ptr("email"),
+  const StringSlice names_slice[] = {
+      string_slice_from_ptr(names[0]),
+      string_slice_from_ptr(names[1]),
   };
 
-  STATIC_ASSERT(ARRAY_LENGTH(names) == ARRAY_LENGTH(types));
+  STATIC_ASSERT(ARRAY_LENGTH(names_slice) == ARRAY_LENGTH(types));
 
   assert(
       database_create_table(
           db,
           string_slice_from_ptr(USERS_TABLE_NAME),
-          names,
+          names_slice,
           types,
-          ARRAY_LENGTH(names))
+          ARRAY_LENGTH(names_slice))
       == DATABASE_CREATE_TABLE_OK);
 }
 
@@ -137,6 +144,42 @@ void dump_table(Database *db)
   relation_destroy(&relation);
 }
 
+void project_email(Database *db)
+{
+  const StringSlice names_slice[] = {
+      string_slice_from_ptr(names[1]),
+  };
+
+  Relation relation = {};
+  assert(
+      database_read_relation(
+          db, &relation, string_slice_from_ptr(USERS_TABLE_NAME))
+      == DATABASE_READ_RELATION_OK);
+  assert(
+      relation_project(&relation, names_slice, ARRAY_LENGTH(names_slice))
+      == RELATION_PROJECT_OK);
+  relation_print(relation);
+  relation_destroy(&relation);
+}
+
+void project_id(Database *db)
+{
+  const StringSlice names_slice[] = {
+      string_slice_from_ptr(names[0]),
+  };
+
+  Relation relation = {};
+  assert(
+      database_read_relation(
+          db, &relation, string_slice_from_ptr(USERS_TABLE_NAME))
+      == DATABASE_READ_RELATION_OK);
+  assert(
+      relation_project(&relation, names_slice, ARRAY_LENGTH(names_slice))
+      == RELATION_PROJECT_OK);
+  relation_print(relation);
+  relation_destroy(&relation);
+}
+
 void delete_tuples(Database *db)
 {
   const ColumnValue values[] = {
@@ -160,10 +203,7 @@ int main(int argc, char *argv[])
   UNUSED(argv);
 
   Database db = {};
-  if (database_new(&db, 1, 1, 1) == ALLOCATE_OUT_OF_MEMORY)
-  {
-    exit(PROGRAM_EXIT_ERROR);
-  }
+  assert(database_new(&db, 1, 1, 1) == ALLOCATE_OK);
 
   create_table(&db);
 
@@ -171,7 +211,12 @@ int main(int argc, char *argv[])
 
   dump_table(&db);
 
+  project_email(&db);
+  project_id(&db);
+
   delete_tuples(&db);
+
+  dump_table(&db);
 
   drop_table(&db);
 }

@@ -68,6 +68,20 @@ static bool32 string_slice_eq(StringSlice a, StringSlice b)
   return i == a.length;
 }
 
+bool32 string_contains(
+    const StringSlice *haystack, size_t length, const StringSlice needle)
+{
+  for (size_t i = 0; i < length; ++i)
+  {
+    if (string_slice_eq(needle, haystack[i]))
+    {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 static AllocateError allocate(void **memory, size_t length)
 {
   assert(memory != NULL);

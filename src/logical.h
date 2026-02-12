@@ -80,6 +80,179 @@ AllocateError relation_append_string(
   return ALLOCATE_OK;
 }
 
+void relation_update_variable_data(
+    Relation *relation, MemorySlice *slice, size_t *offset)
+{
+  if (*offset < slice->offset)
+  {
+    memory_copy_forward(
+        &relation->data[*offset],
+        &relation->data[slice->offset],
+        slice->length);
+  }
+  slice->offset = *offset;
+  *offset += slice->length;
+}
+
+typedef enum
+{
+  RELATION_PROJECT_OK,
+  RELATION_PROJECT_OUT_OF_MEMORY,
+  RELATION_PROJECT_COMPLETED_BUT_OUT_OF_MEMORY,
+  RELATION_PROJECT_NON_EXISTING_COLUMNS,
+} RelationProjectError;
+
+RelationProjectError
+relation_project(Relation *relation, const StringSlice *names, size_t length)
+{
+  bool32 *to_keep = NULL;
+  size_t to_keep_length = 0;
+  ColumnsLength tuple_length = 0;
+  for (ColumnsLength column = 0; column < relation->tuple_length; ++column)
+  {
+    MemorySlice column_name = relation->names[column];
+
+    if (reallocate_update_length(
+            sizeof(*to_keep),
+            &to_keep, // TODO: fix warning
+            &to_keep_length,
+            to_keep_length + 1)
+        != ALLOCATE_OK)
+    {
+      deallocate(to_keep, to_keep_length);
+      return RELATION_PROJECT_OUT_OF_MEMORY;
+    }
+
+    StringSlice slice = (StringSlice){
+        .length = column_name.length,
+        .data = &relation->data[column_name.offset],
+    };
+    to_keep[to_keep_length - 1] = false;
+    if (string_contains(names, length, slice))
+    {
+      to_keep[to_keep_length - 1] = true;
+      tuple_length += 1;
+    }
+  }
+
+  if (tuple_length != length)
+  {
+    deallocate(to_keep, to_keep_length);
+    return RELATION_PROJECT_NON_EXISTING_COLUMNS;
+  }
+
+  if (tuple_length == relation->tuple_length)
+  {
+    deallocate(to_keep, to_keep_length);
+    return RELATION_PROJECT_OK;
+  }
+
+  // We assume that a field that comes earlier in memory stores it's variable
+  // data earlier in memory, this checks that
+  size_t last_offset = 0;
+  size_t data_offset = 0;
+
+  // Move the names variable data first before the tuple variable data
+  for (ColumnsLength column = 0, save_column = 0;
+       column < relation->tuple_length;
+       ++column)
+  {
+    MemorySlice *column_name = &relation->names[column];
+
+    // First two iterations last_offset is 0, first due to initialization
+    // and second because the first offset is always zero
+    assert(column == 0 || column == 1 || last_offset != 0);
+    assert(column < 2 || column_name->offset > last_offset);
+    last_offset = column_name->offset;
+
+    if (to_keep[column])
+    {
+      relation_update_variable_data(relation, column_name, &data_offset);
+      relation->names[save_column] = relation->names[column];
+      save_column += 1;
+    }
+    assert(data_offset <= relation->data_length);
+  }
+
+  for (size_t tuple = 0; tuple < relation->length; ++tuple)
+  {
+    for (ColumnsLength column = 0, save_column = 0;
+         column < relation->tuple_length;
+         ++column)
+    {
+      if (!to_keep[column])
+      {
+        continue;
+      }
+
+      ColumnValue2 *value =
+          &relation->values[(relation->tuple_length * tuple) + column];
+      switch (relation->types[column])
+      {
+      case COLUMN_TYPE_INTEGER:
+        break;
+
+      case COLUMN_TYPE_STRING:
+        assert(column < 2 || value->string.offset > last_offset);
+        last_offset = value->string.offset;
+        relation_update_variable_data(relation, &value->string, &data_offset);
+        break;
+      }
+
+      relation->values[(tuple_length * tuple) + save_column] = *value;
+      save_column += 1;
+    }
+    assert(data_offset <= relation->data_length);
+  }
+
+  // Save the types later as we need them in the tuples loop
+  for (ColumnsLength column = 0, save_column = 0;
+       column < relation->tuple_length;
+       ++column)
+  {
+    if (to_keep[column])
+    {
+      relation->types[save_column] = relation->types[column];
+      save_column += 1;
+    }
+  }
+  deallocate(to_keep, to_keep_length);
+
+  AllocateError reallocate_names = reallocate(
+      sizeof(*relation->names),
+      &relation->names,
+      relation->tuple_length,
+      tuple_length);
+
+  AllocateError reallocate_types = reallocate(
+      sizeof(*relation->types),
+      &relation->types,
+      relation->tuple_length,
+      tuple_length);
+
+  AllocateError reallocate_values = reallocate(
+      sizeof(*relation->values),
+      &relation->values,
+      relation->tuple_length * relation->length,
+      tuple_length * relation->length);
+
+  AllocateError reallocate_data = reallocate_update_length(
+      sizeof(*relation->data),
+      &relation->data,
+      &relation->data_length,
+      data_offset);
+
+  relation->tuple_length = tuple_length;
+
+  if (reallocate_names != ALLOCATE_OK || reallocate_types != ALLOCATE_OK
+      || reallocate_values != ALLOCATE_OK || reallocate_data != ALLOCATE_OK)
+  {
+    return RELATION_PROJECT_COMPLETED_BUT_OUT_OF_MEMORY;
+  }
+
+  return RELATION_PROJECT_OK;
+}
+
 // ----- Relation -----
 
 // ---------- Schema types ----------
@@ -223,6 +396,7 @@ typedef enum
   DATABASE_CREATE_TABLE_NO_SPACE,
 } DatabaseCreateTableError;
 
+// TODO: Check that column names are unique
 static DatabaseCreateTableError database_create_table(
     Database *db,
     StringSlice name,
