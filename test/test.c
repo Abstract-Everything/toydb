@@ -134,7 +134,29 @@ void insert_tuples(Database *db)
       == DATABASE_INSERT_TUPLE_OK);
 }
 
-void dump_table(Database *db)
+void dump_relations_table(Database *db)
+{
+  Relation relation = {};
+  assert(
+      database_read_relation(
+          db, &relation, string_slice_from_ptr(relations_relation_name))
+      == DATABASE_READ_RELATION_OK);
+  relation_print(relation);
+  relation_destroy(&relation);
+}
+
+void dump_relation_columns_table(Database *db)
+{
+  Relation relation = {};
+  assert(
+      database_read_relation(
+          db, &relation, string_slice_from_ptr(relation_columns_relation_name))
+      == DATABASE_READ_RELATION_OK);
+  relation_print(relation);
+  relation_destroy(&relation);
+}
+
+void dump_users_table(Database *db)
 {
   Relation relation = {};
   assert(
@@ -248,11 +270,13 @@ int main(int argc, char *argv[])
 
   printf("Creating users table\n");
   create_table(&db);
+  dump_relations_table(&db);
+  dump_relation_columns_table(&db);
 
   printf("Inserting tuples\n");
   insert_tuples(&db);
 
-  dump_table(&db);
+  dump_users_table(&db);
 
   printf("Project by email\n");
 
@@ -268,7 +292,10 @@ int main(int argc, char *argv[])
 
   printf("Deleting user with id 0\n");
   delete_tuples(&db);
-  dump_table(&db);
+  dump_users_table(&db);
 
+  printf("Dropping users table\n");
   drop_table(&db);
+  dump_relations_table(&db);
+  dump_relation_columns_table(&db);
 }
