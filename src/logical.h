@@ -39,7 +39,7 @@ AllocateError relation_append_tuple(Relation *relation, ColumnValue2 **tuple)
   size_t allocated = relation->tuple_length * relation->length;
   AllocateError error = reallocate(
       sizeof(relation->values[0]),
-      &relation->values,
+      (void **)&relation->values,
       allocated,
       relation->tuple_length + allocated);
 
@@ -134,7 +134,7 @@ relation_project(Relation *relation, const StringSlice *names, size_t length)
 
     if (reallocate_update_length(
             sizeof(*to_keep),
-            &to_keep, // TODO: fix warning
+            (void **)&to_keep,
             &to_keep_length,
             to_keep_length + 1)
         != ALLOCATE_OK)
@@ -240,19 +240,19 @@ relation_project(Relation *relation, const StringSlice *names, size_t length)
 
   AllocateError reallocate_names = reallocate(
       sizeof(*relation->names),
-      &relation->names,
+      (void **)&relation->names,
       relation->tuple_length,
       tuple_length);
 
   AllocateError reallocate_types = reallocate(
       sizeof(*relation->types),
-      &relation->types,
+      (void **)&relation->types,
       relation->tuple_length,
       tuple_length);
 
   AllocateError reallocate_values = reallocate(
       sizeof(*relation->values),
-      &relation->values,
+      (void **)&relation->values,
       relation->tuple_length * relation->length,
       tuple_length * relation->length);
 
@@ -428,7 +428,7 @@ RelationSelectError relation_select(
 
   AllocateError reallocate_values = reallocate(
       sizeof(*relation->values),
-      &relation->values, // TODO: fix warning
+      (void **)&relation->values,
       relation->tuple_length * relation->length,
       relation->tuple_length * length);
 
@@ -630,7 +630,7 @@ static DatabaseCreateTableError database_create_table(
   // TODO: Implement dynamic array
   if (reallocate_update_length(
           sizeof(db->user_relations[0]),
-          &db->user_relations, // TODO: warning
+          (void **)&db->user_relations,
           &db->user_relations_length,
           db->user_relations_length + 1)
       == ALLOCATE_OUT_OF_MEMORY)
@@ -700,7 +700,7 @@ static DatabaseCreateTableError database_create_table(
     // TODO: Implement dynamic array
     if (reallocate_update_length(
             sizeof(db->user_relations[0]),
-            &db->user_relations, // TODO: warning
+            (void **)&db->user_relations,
             &db->user_relations_length,
             db->user_relations_length - 1)
         == ALLOCATE_OUT_OF_MEMORY)
@@ -746,7 +746,7 @@ database_drop_table(Database *db, StringSlice name)
   // relation to be removed is always last
   if (reallocate_update_length(
           sizeof(db->user_relations[0]),
-          &db->user_relations, // TODO: warning
+          (void **)&db->user_relations,
           &db->user_relations_length,
           db->user_relations_length - 1)
       == ALLOCATE_OUT_OF_MEMORY)
