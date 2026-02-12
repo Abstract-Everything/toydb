@@ -94,6 +94,26 @@ void relation_update_variable_data(
   *offset += slice->length;
 }
 
+bool32 relation_get_column_index(
+    Relation *relation, StringSlice column_name, ColumnsLength *column_index)
+{
+  for (ColumnsLength column = 0; column < relation->tuple_length; ++column)
+  {
+    MemorySlice name = relation->names[column];
+    StringSlice slice = (StringSlice){
+        .length = name.length,
+        .data = &relation->data[name.offset],
+    };
+    if (string_slice_eq(slice, column_name))
+    {
+      *column_index = column;
+      return true;
+    }
+  }
+
+  return false;
+}
+
 typedef enum
 {
   RELATION_PROJECT_OK,
@@ -253,6 +273,180 @@ relation_project(Relation *relation, const StringSlice *names, size_t length)
   return RELATION_PROJECT_OK;
 }
 
+typedef enum
+{
+  PREDICATE_OPERATOR_GRANULAR_INVALID,
+  PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL,
+  PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL,
+  PREDICATE_OPERATOR_GRANULAR_STRING_PREFIX_EQUAL,
+} PredicateOperatorGranular;
+
+typedef enum
+{
+  PREDICATE_OPERATOR_EQUAL,
+  PREDICATE_OPERATOR_STRING_PREFIX_EQUAL,
+} PredicateOperator;
+
+typedef struct
+{
+  PredicateOperator operator;
+  ColumnValue value;
+} Predicate;
+
+typedef enum
+{
+  RELATION_SELECT_OK,
+  RELATION_SELECT_COMPLETED_BUT_OUT_OF_MEMORY,
+  RELATION_SELECT_COLUMN_NOT_FOUND,
+  RELATION_SELECT_OPERATOR_TYPE_MISMATCH,
+} RelationSelectError;
+
+RelationSelectError relation_select(
+    Relation *relation, StringSlice column_name, Predicate predicate)
+{
+  ColumnsLength column_index = 0;
+  if (!relation_get_column_index(relation, column_name, &column_index))
+  {
+    return RELATION_SELECT_COLUMN_NOT_FOUND;
+  }
+
+  PredicateOperatorGranular op = PREDICATE_OPERATOR_GRANULAR_INVALID;
+  switch (predicate.operator)
+  {
+  case PREDICATE_OPERATOR_EQUAL:
+    switch (relation->types[column_index])
+    {
+    case COLUMN_TYPE_INTEGER:
+      op = PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL;
+      break;
+
+    case COLUMN_TYPE_STRING:
+      op = PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL;
+      break;
+    }
+    break;
+
+  case PREDICATE_OPERATOR_STRING_PREFIX_EQUAL:
+    if (relation->types[column_index] != COLUMN_TYPE_STRING)
+    {
+      return RELATION_SELECT_OPERATOR_TYPE_MISMATCH;
+    }
+    op = PREDICATE_OPERATOR_GRANULAR_STRING_PREFIX_EQUAL;
+    break;
+  }
+
+  size_t length = 0;
+  size_t data_offset = 0;
+  for (size_t tuple_index = 0; tuple_index < relation->length; ++tuple_index)
+  {
+    ColumnValue2 *tuple =
+        relation->values + (relation->tuple_length * tuple_index);
+
+    ColumnValue2 *value = &tuple[column_index];
+
+    bool32 keep = false;
+    switch (op)
+    {
+    case PREDICATE_OPERATOR_GRANULAR_INVALID:
+      assert(false);
+      break;
+
+    case PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL:
+      keep = value->integer == predicate.value.integer;
+      break;
+
+    case PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL:
+      keep = string_slice_eq(
+          (StringSlice){
+              .length = value->string.length,
+              .data = &relation->data[value->string.offset],
+          },
+          predicate.value.string);
+      break;
+
+    case PREDICATE_OPERATOR_GRANULAR_STRING_PREFIX_EQUAL:
+      keep = string_slice_prefix_eq(
+          (StringSlice){
+              .length = value->string.length,
+              .data = &relation->data[value->string.offset],
+          },
+          predicate.value.string);
+      break;
+    }
+
+    if (!keep)
+    {
+      // Find the first field that needs to be overwritten
+      if (data_offset == 0)
+      {
+        for (size_t column_index = 0;
+             column_index < relation->tuple_length && data_offset == 0;
+             ++column_index)
+        {
+          switch (relation->types[column_index])
+          {
+          case COLUMN_TYPE_INTEGER:
+            break;
+
+          case COLUMN_TYPE_STRING:
+            data_offset = tuple[column_index].string.offset;
+            break;
+          }
+        }
+      }
+
+      continue;
+    }
+
+    if (length < tuple_index)
+    {
+      assert(data_offset != 0);
+
+      memory_copy_forward(
+          relation->values + (relation->tuple_length * length),
+          tuple,
+          sizeof(*relation->values) * relation->tuple_length);
+
+      for (size_t column_index = 0;
+           column_index < relation->tuple_length && data_offset == 0;
+           ++column_index)
+      {
+        switch (relation->types[column_index])
+        {
+        case COLUMN_TYPE_INTEGER:
+          break;
+
+        case COLUMN_TYPE_STRING:
+          relation_update_variable_data(relation, &value->string, &data_offset);
+          break;
+        }
+      }
+    }
+
+    length += 1;
+  }
+
+  AllocateError reallocate_values = reallocate(
+      sizeof(*relation->values),
+      &relation->values, // TODO: fix warning
+      relation->tuple_length * relation->length,
+      relation->tuple_length * length);
+
+  AllocateError reallocate_data = reallocate_update_length(
+      sizeof(*relation->data),
+      &relation->data,
+      &relation->data_length,
+      data_offset);
+
+  if (reallocate_values != ALLOCATE_OK || reallocate_data != ALLOCATE_OK)
+  {
+    return RELATION_SELECT_COMPLETED_BUT_OUT_OF_MEMORY;
+  }
+
+  relation->length = length;
+
+  return RELATION_SELECT_OK;
+}
 // ----- Relation -----
 
 // ---------- Schema types ----------

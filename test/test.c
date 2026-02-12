@@ -7,7 +7,6 @@
 
 void relation_print(Relation relation)
 {
-  printf("\n\n");
 
   for (ColumnsLength i = 0; i < relation.tuple_length; ++i)
   {
@@ -52,6 +51,8 @@ void relation_print(Relation relation)
 
     printf("\n");
   }
+
+  printf("\n\n");
 }
 
 const ColumnType types[] = {
@@ -180,6 +181,46 @@ void project_id(Database *db)
   relation_destroy(&relation);
 }
 
+void select_id(Database *db)
+{
+  Relation relation = {};
+  assert(
+      database_read_relation(
+          db, &relation, string_slice_from_ptr(USERS_TABLE_NAME))
+      == DATABASE_READ_RELATION_OK);
+  assert(
+      relation_select(
+          &relation,
+          string_slice_from_ptr(names[0]),
+          (Predicate){
+              .operator = PREDICATE_OPERATOR_EQUAL,
+              .value = {.integer = 0},
+          })
+      == RELATION_SELECT_OK);
+  relation_print(relation);
+  relation_destroy(&relation);
+}
+
+void select_email(Database *db)
+{
+  Relation relation = {};
+  assert(
+      database_read_relation(
+          db, &relation, string_slice_from_ptr(USERS_TABLE_NAME))
+      == DATABASE_READ_RELATION_OK);
+  assert(
+      relation_select(
+          &relation,
+          string_slice_from_ptr(names[1]),
+          (Predicate){
+              .operator = PREDICATE_OPERATOR_STRING_PREFIX_EQUAL,
+              .value = {.string = string_slice_from_ptr("user")},
+          })
+      == RELATION_SELECT_OK);
+  relation_print(relation);
+  relation_destroy(&relation);
+}
+
 void delete_tuples(Database *db)
 {
   const ColumnValue values[] = {
@@ -205,17 +246,28 @@ int main(int argc, char *argv[])
   Database db = {};
   assert(database_new(&db, 1, 1, 1) == ALLOCATE_OK);
 
+  printf("Creating users table\n");
   create_table(&db);
 
+  printf("Inserting tuples\n");
   insert_tuples(&db);
 
   dump_table(&db);
 
+  printf("Project by email\n");
+
   project_email(&db);
+  printf("Project by id\n");
   project_id(&db);
 
-  delete_tuples(&db);
+  printf("Select id is 0\n");
+  select_id(&db);
 
+  printf("Select email with prefix 'user'\n");
+  select_email(&db);
+
+  printf("Deleting user with id 0\n");
+  delete_tuples(&db);
   dump_table(&db);
 
   drop_table(&db);

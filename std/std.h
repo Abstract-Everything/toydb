@@ -55,6 +55,19 @@ static StringSlice string_slice_from_ptr(const char *ptr)
   };
 }
 
+static bool32 string_slice_prefix_eq(StringSlice string, StringSlice prefix)
+{
+  if (string.length < prefix.length)
+  {
+    return false;
+  }
+
+  size_t i = 0;
+  for (; i < prefix.length && string.data[i] == prefix.data[i]; ++i) {}
+
+  return i == prefix.length;
+}
+
 static bool32 string_slice_eq(StringSlice a, StringSlice b)
 {
   if (a.length != b.length)
