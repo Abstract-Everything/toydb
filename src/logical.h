@@ -766,7 +766,7 @@ database_drop_table(Database *db, StringSlice name)
       (ColumnValue){.integer = relation_id});
 
   memory_store_delete_tuples(
-      &db->relation_columns,
+      &db->relations,
       relations_column_types,
       ARRAY_LENGTH(relations_column_types),
       0,
