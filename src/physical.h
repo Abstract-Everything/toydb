@@ -35,7 +35,7 @@ typedef struct
 {
   size_t offset;
   size_t length;
-} MemoryString;
+} MemorySlice;
 
 typedef union
 {
@@ -47,7 +47,7 @@ typedef union
 typedef union
 {
   MemoryInteger integer;
-  MemoryString string;
+  MemorySlice string;
 } ColumnValue2;
 
 static size_t column_type_fixed_size(ColumnType type)

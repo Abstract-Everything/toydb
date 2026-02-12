@@ -9,7 +9,7 @@ typedef struct
 {
   size_t length;
   ColumnsLength tuple_length;
-  MemoryString *names;
+  MemorySlice *names;
   ColumnType *types;
   ColumnValue2 *values;
   size_t data_length;
@@ -56,10 +56,10 @@ AllocateError relation_append_tuple(Relation *relation, ColumnValue2 **tuple)
 }
 
 AllocateError relation_append_string(
-    Relation *relation, StringSlice string, MemoryString *memory_string)
+    Relation *relation, StringSlice string, MemorySlice *memory_string)
 {
   assert(memory_string != NULL);
-  *memory_string = (MemoryString){
+  *memory_string = (MemorySlice){
       .length = string.length,
       .offset = relation->data_length,
   };
@@ -408,7 +408,7 @@ static AllocateError database_get_relation_column_metadata_(
     int64_t id,
     ColumnsLength *tuple_length_,
     ColumnType **types,
-    MemoryString **names,
+    MemorySlice **names,
     void **data,
     size_t *data_length)
 {
@@ -506,7 +506,7 @@ static AllocateError database_get_relation_column_metadata_(
         }
       }
 
-      MemoryString string = (MemoryString){
+      MemorySlice string = (MemorySlice){
           .length = name.string.length,
           .offset = *data_length,
       };
@@ -563,7 +563,7 @@ static AllocateError database_get_relation_column_metadata(
     int64_t id,
     ColumnsLength *tuple_length,
     ColumnType **types,
-    MemoryString **names,
+    MemorySlice **names,
     void **data,
     size_t *data_length)
 {
