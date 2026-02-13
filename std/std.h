@@ -12,6 +12,7 @@
 #define ARRAY_LENGTH(a) (sizeof(a) / sizeof(*(a)))
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 typedef int32_t bool32;
 const bool32 false = 0;
