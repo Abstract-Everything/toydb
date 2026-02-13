@@ -6,7 +6,7 @@
 #define USERS_TABLE_NAME "users"
 #define SHOPPING_CART_TABLE_NAME "shopping_cart"
 
-void relation_print(Relation relation)
+static void relation_print(Relation relation)
 {
 
   for (ColumnsLength i = 0; i < relation.tuple_length; ++i)
@@ -76,7 +76,7 @@ const char *const shopping_cart_relation_names[] = {
     "item",
 };
 
-void create_users_table(Database *db)
+static void create_users_table(Database *db)
 {
   const StringSlice names_slice[] = {
       string_slice_from_ptr(users_relation_names[0]),
@@ -96,7 +96,7 @@ void create_users_table(Database *db)
       == DATABASE_CREATE_TABLE_OK);
 }
 
-void create_shopping_cart_table(Database *db)
+static void create_shopping_cart_table(Database *db)
 {
   const StringSlice names_slice[] = {
       string_slice_from_ptr(shopping_cart_relation_names[0]),
@@ -116,12 +116,12 @@ void create_shopping_cart_table(Database *db)
       == DATABASE_CREATE_TABLE_OK);
 }
 
-void drop_table(Database *db)
+static void drop_table(Database *db)
 {
   database_drop_table(db, string_slice_from_ptr(USERS_TABLE_NAME));
 }
 
-void insert_users(Database *db)
+static void insert_users(Database *db)
 {
   const ColumnValue values1[] = {
       {.integer = 0},
@@ -166,7 +166,7 @@ void insert_users(Database *db)
       == DATABASE_INSERT_TUPLE_OK);
 }
 
-void insert_shopping_cart_items(Database *db)
+static void insert_shopping_cart_items(Database *db)
 {
   const ColumnValue values1[] = {
       {.integer = 0},
@@ -259,7 +259,7 @@ void insert_shopping_cart_items(Database *db)
       == DATABASE_INSERT_TUPLE_OK);
 }
 
-void dump_relations_table(Database *db)
+static void dump_relations_table(Database *db)
 {
   Relation relation = {};
   assert(
@@ -270,7 +270,7 @@ void dump_relations_table(Database *db)
   relation_destroy(&relation);
 }
 
-void dump_relation_columns_table(Database *db)
+static void dump_relation_columns_table(Database *db)
 {
   Relation relation = {};
   assert(
@@ -281,7 +281,7 @@ void dump_relation_columns_table(Database *db)
   relation_destroy(&relation);
 }
 
-void dump_users_table(Database *db)
+static void dump_users_table(Database *db)
 {
   Relation relation = {};
   assert(
@@ -292,7 +292,7 @@ void dump_users_table(Database *db)
   relation_destroy(&relation);
 }
 
-void dump_shopping_cart_table(Database *db)
+static void dump_shopping_cart_table(Database *db)
 {
   Relation relation = {};
   assert(
@@ -303,7 +303,7 @@ void dump_shopping_cart_table(Database *db)
   relation_destroy(&relation);
 }
 
-void project_email(Database *db)
+static void project_email(Database *db)
 {
   const StringSlice names_slice[] = {
       string_slice_from_ptr(users_relation_names[1]),
@@ -321,7 +321,7 @@ void project_email(Database *db)
   relation_destroy(&relation);
 }
 
-void project_id(Database *db)
+static void project_id(Database *db)
 {
   const StringSlice names_slice[] = {
       string_slice_from_ptr(users_relation_names[0]),
@@ -339,7 +339,7 @@ void project_id(Database *db)
   relation_destroy(&relation);
 }
 
-void select_id(Database *db)
+static void select_id(Database *db)
 {
   Relation relation = {};
   assert(
@@ -359,7 +359,7 @@ void select_id(Database *db)
   relation_destroy(&relation);
 }
 
-void select_email(Database *db)
+static void select_email(Database *db)
 {
   Relation relation = {};
   assert(
@@ -379,7 +379,7 @@ void select_email(Database *db)
   relation_destroy(&relation);
 }
 
-void cartesian_product(Database *db)
+static void cartesian_product(Database *db)
 {
   Relation users = {};
   assert(
@@ -403,7 +403,7 @@ void cartesian_product(Database *db)
   relation_destroy(&product);
 }
 
-void delete_tuples(Database *db)
+static void delete_tuples(Database *db)
 {
   const ColumnValue values[] = {
       {.integer = 0},

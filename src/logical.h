@@ -16,7 +16,7 @@ typedef struct
   void *data;
 } Relation;
 
-void relation_destroy(Relation *relation)
+static void relation_destroy(Relation *relation)
 {
   deallocate(relation->data, relation->data_length);
 
@@ -31,7 +31,8 @@ void relation_destroy(Relation *relation)
       relation->names, sizeof(*relation->names) * relation->tuple_length);
 }
 
-AllocateError relation_append_tuple(Relation *relation, ColumnValue2 **tuple)
+static AllocateError
+relation_append_tuple(Relation *relation, ColumnValue2 **tuple)
 {
   assert(tuple != NULL);
   assert(*tuple == NULL);
@@ -55,7 +56,7 @@ AllocateError relation_append_tuple(Relation *relation, ColumnValue2 **tuple)
   return ALLOCATE_OK;
 }
 
-AllocateError relation_append_string(
+static AllocateError relation_append_string(
     Relation *relation, StringSlice string, MemorySlice *memory_string)
 {
   assert(memory_string != NULL);
@@ -80,7 +81,7 @@ AllocateError relation_append_string(
   return ALLOCATE_OK;
 }
 
-void relation_update_variable_data(
+static void relation_update_variable_data(
     Relation *relation, MemorySlice *slice, size_t *offset)
 {
   if (*offset < slice->offset)
@@ -94,7 +95,7 @@ void relation_update_variable_data(
   *offset += slice->length;
 }
 
-bool32 relation_get_column_index(
+static bool32 relation_get_column_index(
     Relation *relation, StringSlice column_name, ColumnsLength *column_index)
 {
   for (ColumnsLength column = 0; column < relation->tuple_length; ++column)
@@ -122,7 +123,7 @@ typedef enum
   RELATION_PROJECT_NON_EXISTING_COLUMNS,
 } RelationProjectError;
 
-RelationProjectError
+static RelationProjectError
 relation_project(Relation *relation, const StringSlice *names, size_t length)
 {
   bool32 *to_keep = NULL;
@@ -301,7 +302,7 @@ typedef enum
   RELATION_SELECT_OPERATOR_TYPE_MISMATCH,
 } RelationSelectError;
 
-RelationSelectError relation_select(
+static RelationSelectError relation_select(
     Relation *relation, StringSlice column_name, Predicate predicate)
 {
   ColumnsLength column_index = 0;
@@ -701,7 +702,8 @@ static AllocateError database_new(
   return ALLOCATE_OK;
 }
 
-bool32 query_relation_id_by_name(Database db, StringSlice name, int64_t *id)
+static bool32
+query_relation_id_by_name(Database db, StringSlice name, int64_t *id)
 {
   for (TupleIterator i = memory_store_iterate(&db.relations); i.valid;
        tuple_iterator_next(&i))
@@ -720,7 +722,7 @@ bool32 query_relation_id_by_name(Database db, StringSlice name, int64_t *id)
   return false;
 }
 
-size_t find_user_relation_index(Database db, int64_t id)
+static size_t find_user_relation_index(Database db, int64_t id)
 {
   for (size_t i = 0; i < db.user_relations_length; ++i)
   {
