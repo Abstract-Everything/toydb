@@ -394,7 +394,9 @@ static void cartesian_product(Database *db)
       == DATABASE_READ_RELATION_OK);
 
   Relation product = {};
-  assert(relation_cartesian_product(users, cart, &product) == ALLOCATE_OK);
+  assert(
+      relation_cartesian_product(users, cart, &product)
+      == RELATION_CARTESIAN_PRODUCT_OK);
 
   relation_print(product);
 

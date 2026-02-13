@@ -69,6 +69,20 @@ static bool32 string_slice_prefix_eq(StringSlice string, StringSlice prefix)
   return i == prefix.length;
 }
 
+// Returns a StringSlice past the specified character, if the character is not
+// found StringSlice.data == NULL
+static StringSlice string_slice_find_past(StringSlice string, char character)
+{
+  size_t i = 0;
+  for (; i < string.length && string.data[i] != character; ++i) {}
+  i += 1;
+
+  return (StringSlice){
+      .data = i == string.length ? NULL : string.data + i,
+      .length = string.length - i,
+  };
+}
+
 static bool32 string_slice_eq(StringSlice a, StringSlice b)
 {
   if (a.length != b.length)
@@ -80,20 +94,6 @@ static bool32 string_slice_eq(StringSlice a, StringSlice b)
   for (; i < a.length && a.data[i] == b.data[i]; ++i) {}
 
   return i == a.length;
-}
-
-static bool32 string_contains(
-    const StringSlice *haystack, size_t length, const StringSlice needle)
-{
-  for (size_t i = 0; i < length; ++i)
-  {
-    if (string_slice_eq(needle, haystack[i]))
-    {
-      return true;
-    }
-  }
-
-  return false;
 }
 
 static AllocateError allocate(void **memory, size_t length)

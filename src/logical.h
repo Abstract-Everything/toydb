@@ -3,6 +3,8 @@
 #include "physical.h"
 #include "std.h"
 
+#define RELATION_NAME_QUALIFIER '.'
+
 // ----- Relation -----
 
 typedef struct
@@ -61,16 +63,26 @@ static void relation_set_column_name(
     void *data,
     size_t *data_offset,
     size_t column_index,
+    StringSlice relation_name,
     StringSlice column_name)
 {
   MemorySlice string = (MemorySlice){
-      .length = column_name.length,
+      .length = relation_name.length + 1 + column_name.length,
       .offset = *data_offset,
   };
   names[column_index] = string;
 
   memory_copy_forward(
-      &data[string.offset], column_name.data, column_name.length);
+      &data[string.offset], relation_name.data, relation_name.length);
+
+  ((char *)data)[string.offset + relation_name.length] =
+      RELATION_NAME_QUALIFIER;
+
+  memory_copy_forward(
+      &data[string.offset + 1 + relation_name.length],
+      column_name.data,
+      column_name.length);
+
   *data_offset += string.length;
 }
 
@@ -114,18 +126,28 @@ static void relation_update_variable_data(
 }
 
 static bool32 relation_get_column_index(
-    Relation *relation, StringSlice column_name, ColumnsLength *column_index)
+    Relation *relation, StringSlice search_name, ColumnsLength *column_index)
 {
-  for (ColumnsLength column = 0; column < relation->tuple_length; ++column)
+  for (ColumnsLength i = 0; i < relation->tuple_length; ++i)
   {
-    MemorySlice name = relation->names[column];
-    StringSlice slice = (StringSlice){
-        .length = name.length,
-        .data = &relation->data[name.offset],
+    StringSlice column_name = (StringSlice){
+        .length = relation->names[i].length,
+        .data = &relation->data[relation->names[i].offset],
     };
-    if (string_slice_eq(slice, column_name))
+
+    StringSlice search_name_qualifier =
+        string_slice_find_past(search_name, RELATION_NAME_QUALIFIER);
+
+    StringSlice column_name_qualifier =
+        string_slice_find_past(column_name, RELATION_NAME_QUALIFIER);
+
+    assert(column_name_qualifier.data != NULL);
+
+    if ((search_name_qualifier.data != NULL
+         && string_slice_eq(column_name, search_name))
+        || string_slice_eq(column_name_qualifier, search_name))
     {
-      *column_index = column;
+      *column_index = i;
       return true;
     }
   }
@@ -142,8 +164,8 @@ typedef enum
   RELATION_PROJECT_DUPLICATE_COLUMN_NAMES,
 } RelationProjectError;
 
-static RelationProjectError
-relation_project(Relation *relation, const StringSlice *names, size_t length)
+static RelationProjectError relation_project(
+    Relation *relation, const StringSlice *names, ColumnsLength tuple_length)
 {
   bool32 *to_keep = NULL;
   if (allocate((void **)&to_keep, sizeof(*to_keep) * relation->tuple_length)
@@ -152,28 +174,20 @@ relation_project(Relation *relation, const StringSlice *names, size_t length)
     return RELATION_PROJECT_COMPLETED_BUT_OUT_OF_MEMORY;
   }
 
-  size_t tuple_length = 0;
-  for (ColumnsLength column = 0; column < relation->tuple_length; ++column)
+  for (ColumnsLength i = 0; i < relation->tuple_length; ++i)
   {
-    MemorySlice column_name = relation->names[column];
-
-    StringSlice slice = (StringSlice){
-        .length = column_name.length,
-        .data = &relation->data[column_name.offset],
-    };
-
-    to_keep[column] = false;
-    if (string_contains(names, length, slice))
-    {
-      to_keep[column] = true;
-      tuple_length += 1;
-    }
+    to_keep[i] = false;
   }
 
-  if (tuple_length != length)
+  for (ColumnsLength i = 0; i < tuple_length; ++i)
   {
-    deallocate(to_keep, relation->tuple_length);
-    return RELATION_PROJECT_NON_EXISTING_COLUMNS;
+    ColumnsLength column_id = 0;
+    if (!relation_get_column_index(relation, names[i], &column_id))
+    {
+      deallocate(to_keep, relation->tuple_length);
+      return RELATION_PROJECT_NON_EXISTING_COLUMNS;
+    }
+    to_keep[column_id] = true;
   }
 
   if (tuple_length == relation->tuple_length)
@@ -525,7 +539,14 @@ static void relation_copy_values(
   }
 }
 
-static AllocateError
+typedef enum
+{
+  RELATION_CARTESIAN_PRODUCT_OK,
+  RELATION_CARTESIAN_PRODUCT_OUT_OF_MEMORY,
+  RELATION_CARTESIAN_PRODUCT_RELATION_COLUMNS_NOT_UNIQUE,
+} RelationCartesianProductError;
+
+static RelationCartesianProductError
 relation_cartesian_product(Relation lhs, Relation rhs, Relation *product)
 {
   assert(product->tuple_length == 0);
@@ -535,6 +556,26 @@ relation_cartesian_product(Relation lhs, Relation rhs, Relation *product)
   assert(product->values == NULL);
   assert(product->data_length == 0);
   assert(product->data == NULL);
+
+  for (ColumnsLength lhs_index = 0; lhs_index < lhs.tuple_length; ++lhs_index)
+  {
+    for (ColumnsLength rhs_index = 0; rhs_index < lhs.tuple_length; ++rhs_index)
+    {
+      StringSlice lhs_slice = (StringSlice){
+          .data = &lhs.data[lhs.names[lhs_index].offset],
+          .length = lhs.names[lhs_index].length,
+      };
+
+      StringSlice rhs_slice = (StringSlice){
+          .data = &rhs.data[rhs.names[rhs_index].offset],
+          .length = rhs.names[rhs_index].length,
+      };
+      if (string_slice_eq(lhs_slice, rhs_slice))
+      {
+        return RELATION_CARTESIAN_PRODUCT_RELATION_COLUMNS_NOT_UNIQUE;
+      }
+    }
+  }
 
   *product = (Relation){
       .length = lhs.length * rhs.length,
@@ -577,7 +618,7 @@ relation_cartesian_product(Relation lhs, Relation rhs, Relation *product)
           .data = NULL,
       };
 
-      return ALLOCATE_OUT_OF_MEMORY;
+      return RELATION_CARTESIAN_PRODUCT_OUT_OF_MEMORY;
     }
   }
 
@@ -609,7 +650,7 @@ relation_cartesian_product(Relation lhs, Relation rhs, Relation *product)
   assert(tuple_index == product->length);
   assert(data_offset == product->data_length);
 
-  return ALLOCATE_OK;
+  return RELATION_CARTESIAN_PRODUCT_OK;
 }
 // ----- Relation -----
 
@@ -941,6 +982,7 @@ database_drop_table(Database *db, StringSlice name)
 }
 
 static AllocateError database_get_static_relation_column_metadata(
+    StringSlice relation_name,
     ColumnsLength tuple_length,
     const char *const *relation_names,
     const ColumnType *relation_types,
@@ -963,7 +1005,8 @@ static AllocateError database_get_static_relation_column_metadata(
     for (size_t column_index = 0; column_index < tuple_length; ++column_index)
     {
       names_data_size +=
-          string_slice_from_ptr(relation_names[column_index]).length;
+          relation_name.length + 1
+          + string_slice_from_ptr(relation_names[column_index]).length;
     }
 
     names_allocate = allocate((void **)names, sizeof(**names) * tuple_length);
@@ -989,7 +1032,8 @@ static AllocateError database_get_static_relation_column_metadata(
     if (names != NULL)
     {
       StringSlice name = string_slice_from_ptr(relation_names[column_index]);
-      relation_set_column_name(*names, *data, data_length, column_index, name);
+      relation_set_column_name(
+          *names, *data, data_length, column_index, relation_name, name);
     }
   }
   assert(data_length == NULL || *data_length == names_data_size);
@@ -1032,6 +1076,7 @@ database_get_relation_column_metadata_(
     ColumnsLength tuple_length = ARRAY_LENGTH(relations_column_types);
 
     if (database_get_static_relation_column_metadata(
+            relation_name,
             tuple_length,
             relations_column_names,
             relations_column_types,
@@ -1055,6 +1100,7 @@ database_get_relation_column_metadata_(
     ColumnsLength tuple_length = ARRAY_LENGTH(relation_columns_column_types);
 
     if (database_get_static_relation_column_metadata(
+            relation_name,
             tuple_length,
             relation_columns_column_names,
             relation_columns_column_types,
@@ -1109,9 +1155,11 @@ database_get_relation_column_metadata_(
 
     largest_column_id = MAX(column_id.integer, largest_column_id);
     tuple_length += 1;
-    names_data_size += column_name.string.length;
+    names_data_size += relation_name.length + 1 + column_name.string.length;
   }
 
+  // We don't allow relations without columns to exist
+  assert(tuple_length > 0);
   assert(tuple_length == largest_column_id + 1);
 
   AllocateError types_allocate = ALLOCATE_OK;
@@ -1176,12 +1224,16 @@ database_get_relation_column_metadata_(
           ARRAY_LENGTH(relation_columns_column_types),
           2);
       relation_set_column_name(
-          *names, *data, data_length, column_id.integer, name.string);
+          *names,
+          *data,
+          data_length,
+          column_id.integer,
+          relation_name,
+          name.string);
     }
   }
 
-  // We don't allow relations without columns to exist
-  assert(tuple_length > 0);
+  assert(data_length == NULL || *data_length == names_data_size);
 
   *tuple_length_ = (ColumnsLength)tuple_length;
   *store =
