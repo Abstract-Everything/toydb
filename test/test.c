@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #define USERS_TABLE_NAME "users"
+#define SHOPPING_CART_TABLE_NAME "shopping_cart"
 
 void relation_print(Relation relation)
 {
@@ -55,31 +56,62 @@ void relation_print(Relation relation)
   printf("\n\n");
 }
 
-const ColumnType types[] = {
+const ColumnType users_relation_types[] = {
     COLUMN_TYPE_INTEGER,
     COLUMN_TYPE_STRING,
 };
 
-const char *const names[] = {
+const char *const users_relation_names[] = {
     "id",
     "email",
 };
 
-void create_table(Database *db)
+const ColumnType shopping_cart_relation_types[] = {
+    COLUMN_TYPE_INTEGER,
+    COLUMN_TYPE_STRING,
+};
+
+const char *const shopping_cart_relation_names[] = {
+    "user_id",
+    "item",
+};
+
+void create_users_table(Database *db)
 {
   const StringSlice names_slice[] = {
-      string_slice_from_ptr(names[0]),
-      string_slice_from_ptr(names[1]),
+      string_slice_from_ptr(users_relation_names[0]),
+      string_slice_from_ptr(users_relation_names[1]),
   };
 
-  STATIC_ASSERT(ARRAY_LENGTH(names_slice) == ARRAY_LENGTH(types));
+  STATIC_ASSERT(
+      ARRAY_LENGTH(names_slice) == ARRAY_LENGTH(users_relation_types));
 
   assert(
       database_create_table(
           db,
           string_slice_from_ptr(USERS_TABLE_NAME),
           names_slice,
-          types,
+          users_relation_types,
+          ARRAY_LENGTH(names_slice))
+      == DATABASE_CREATE_TABLE_OK);
+}
+
+void create_shopping_cart_table(Database *db)
+{
+  const StringSlice names_slice[] = {
+      string_slice_from_ptr(shopping_cart_relation_names[0]),
+      string_slice_from_ptr(shopping_cart_relation_names[1]),
+  };
+
+  STATIC_ASSERT(
+      ARRAY_LENGTH(names_slice) == ARRAY_LENGTH(shopping_cart_relation_types));
+
+  assert(
+      database_create_table(
+          db,
+          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+          names_slice,
+          shopping_cart_relation_types,
           ARRAY_LENGTH(names_slice))
       == DATABASE_CREATE_TABLE_OK);
 }
@@ -89,48 +121,141 @@ void drop_table(Database *db)
   database_drop_table(db, string_slice_from_ptr(USERS_TABLE_NAME));
 }
 
-void insert_tuples(Database *db)
+void insert_users(Database *db)
 {
   const ColumnValue values1[] = {
       {.integer = 0},
       {.string = string_slice_from_ptr("user@company")},
   };
-  STATIC_ASSERT(ARRAY_LENGTH(types) == ARRAY_LENGTH(values1));
+  STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values1));
   assert(
       database_insert_tuple(
           db,
           string_slice_from_ptr(USERS_TABLE_NAME),
-          types,
+          users_relation_types,
           values1,
-          ARRAY_LENGTH(types))
+          ARRAY_LENGTH(users_relation_types))
       == DATABASE_INSERT_TUPLE_OK);
 
   const ColumnValue values2[] = {
       {.integer = 1},
       {.string = string_slice_from_ptr("admin@company")},
   };
-  STATIC_ASSERT(ARRAY_LENGTH(types) == ARRAY_LENGTH(values2));
+  STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values2));
   assert(
       database_insert_tuple(
           db,
           string_slice_from_ptr(USERS_TABLE_NAME),
-          types,
+          users_relation_types,
           values2,
-          ARRAY_LENGTH(types))
+          ARRAY_LENGTH(users_relation_types))
       == DATABASE_INSERT_TUPLE_OK);
 
   const ColumnValue values3[] = {
       {.integer = 2},
       {.string = string_slice_from_ptr("guest@company")},
   };
-  STATIC_ASSERT(ARRAY_LENGTH(types) == ARRAY_LENGTH(values3));
+  STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values3));
   assert(
       database_insert_tuple(
           db,
           string_slice_from_ptr(USERS_TABLE_NAME),
-          types,
+          users_relation_types,
           values3,
-          ARRAY_LENGTH(types))
+          ARRAY_LENGTH(users_relation_types))
+      == DATABASE_INSERT_TUPLE_OK);
+}
+
+void insert_shopping_cart_items(Database *db)
+{
+  const ColumnValue values1[] = {
+      {.integer = 0},
+      {.string = string_slice_from_ptr("soda")},
+  };
+  STATIC_ASSERT(
+      ARRAY_LENGTH(shopping_cart_relation_types) == ARRAY_LENGTH(values1));
+  assert(
+      database_insert_tuple(
+          db,
+          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+          shopping_cart_relation_types,
+          values1,
+          ARRAY_LENGTH(values1))
+      == DATABASE_INSERT_TUPLE_OK);
+
+  const ColumnValue values2[] = {
+      {.integer = 0},
+      {.string = string_slice_from_ptr("bread")},
+  };
+  STATIC_ASSERT(
+      ARRAY_LENGTH(shopping_cart_relation_types) == ARRAY_LENGTH(values2));
+  assert(
+      database_insert_tuple(
+          db,
+          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+          shopping_cart_relation_types,
+          values2,
+          ARRAY_LENGTH(values2))
+      == DATABASE_INSERT_TUPLE_OK);
+
+  const ColumnValue values3[] = {
+      {.integer = 0},
+      {.string = string_slice_from_ptr("sugar")},
+  };
+  STATIC_ASSERT(
+      ARRAY_LENGTH(shopping_cart_relation_types) == ARRAY_LENGTH(values3));
+  assert(
+      database_insert_tuple(
+          db,
+          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+          shopping_cart_relation_types,
+          values3,
+          ARRAY_LENGTH(values3))
+      == DATABASE_INSERT_TUPLE_OK);
+
+  const ColumnValue values4[] = {
+      {.integer = 1},
+      {.string = string_slice_from_ptr("coca powder")},
+  };
+  STATIC_ASSERT(
+      ARRAY_LENGTH(shopping_cart_relation_types) == ARRAY_LENGTH(values4));
+  assert(
+      database_insert_tuple(
+          db,
+          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+          shopping_cart_relation_types,
+          values4,
+          ARRAY_LENGTH(values4))
+      == DATABASE_INSERT_TUPLE_OK);
+
+  const ColumnValue values5[] = {
+      {.integer = 2},
+      {.string = string_slice_from_ptr("bread")},
+  };
+  STATIC_ASSERT(
+      ARRAY_LENGTH(shopping_cart_relation_types) == ARRAY_LENGTH(values5));
+  assert(
+      database_insert_tuple(
+          db,
+          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+          shopping_cart_relation_types,
+          values5,
+          ARRAY_LENGTH(values5))
+      == DATABASE_INSERT_TUPLE_OK);
+
+  const ColumnValue values6[] = {
+      {.integer = 2},
+      {.string = string_slice_from_ptr("brown sugar")},
+  };
+  STATIC_ASSERT(
+      ARRAY_LENGTH(shopping_cart_relation_types) == ARRAY_LENGTH(values6));
+  assert(
+      database_insert_tuple(
+          db,
+          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+          shopping_cart_relation_types,
+          values6,
+          ARRAY_LENGTH(values6))
       == DATABASE_INSERT_TUPLE_OK);
 }
 
@@ -167,10 +292,21 @@ void dump_users_table(Database *db)
   relation_destroy(&relation);
 }
 
+void dump_shopping_cart_table(Database *db)
+{
+  Relation relation = {};
+  assert(
+      database_read_relation(
+          db, &relation, string_slice_from_ptr(SHOPPING_CART_TABLE_NAME))
+      == DATABASE_READ_RELATION_OK);
+  relation_print(relation);
+  relation_destroy(&relation);
+}
+
 void project_email(Database *db)
 {
   const StringSlice names_slice[] = {
-      string_slice_from_ptr(names[1]),
+      string_slice_from_ptr(users_relation_names[1]),
   };
 
   Relation relation = {};
@@ -188,7 +324,7 @@ void project_email(Database *db)
 void project_id(Database *db)
 {
   const StringSlice names_slice[] = {
-      string_slice_from_ptr(names[0]),
+      string_slice_from_ptr(users_relation_names[0]),
   };
 
   Relation relation = {};
@@ -213,7 +349,7 @@ void select_id(Database *db)
   assert(
       relation_select(
           &relation,
-          string_slice_from_ptr(names[0]),
+          string_slice_from_ptr(users_relation_names[0]),
           (Predicate){
               .operator = PREDICATE_OPERATOR_EQUAL,
               .value = {.integer = 0},
@@ -233,7 +369,7 @@ void select_email(Database *db)
   assert(
       relation_select(
           &relation,
-          string_slice_from_ptr(names[1]),
+          string_slice_from_ptr(users_relation_names[1]),
           (Predicate){
               .operator = PREDICATE_OPERATOR_STRING_PREFIX_EQUAL,
               .value = {.string = string_slice_from_ptr("user")},
@@ -243,13 +379,37 @@ void select_email(Database *db)
   relation_destroy(&relation);
 }
 
+void cartesian_product(Database *db)
+{
+  Relation users = {};
+  assert(
+      database_read_relation(
+          db, &users, string_slice_from_ptr(USERS_TABLE_NAME))
+      == DATABASE_READ_RELATION_OK);
+
+  Relation cart = {};
+  assert(
+      database_read_relation(
+          db, &cart, string_slice_from_ptr(SHOPPING_CART_TABLE_NAME))
+      == DATABASE_READ_RELATION_OK);
+
+  Relation product = {};
+  assert(relation_cartesian_product(users, cart, &product) == ALLOCATE_OK);
+
+  relation_print(product);
+
+  relation_destroy(&users);
+  relation_destroy(&cart);
+  relation_destroy(&product);
+}
+
 void delete_tuples(Database *db)
 {
   const ColumnValue values[] = {
       {.integer = 0},
       {.string = string_slice_from_ptr("user@company")},
   };
-  STATIC_ASSERT(ARRAY_LENGTH(types) == ARRAY_LENGTH(values));
+  STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values));
   assert(
       database_delete_tuples(
           db,
@@ -269,14 +429,21 @@ int main(int argc, char *argv[])
   assert(database_new(&db, 1, 1, 1) == ALLOCATE_OK);
 
   printf("Creating users table\n");
-  create_table(&db);
+  create_users_table(&db);
+  dump_relations_table(&db);
+  dump_relation_columns_table(&db);
+
+  printf("Creating shopping cart table\n");
+  create_shopping_cart_table(&db);
   dump_relations_table(&db);
   dump_relation_columns_table(&db);
 
   printf("Inserting tuples\n");
-  insert_tuples(&db);
-
+  insert_users(&db);
   dump_users_table(&db);
+
+  insert_shopping_cart_items(&db);
+  dump_shopping_cart_table(&db);
 
   printf("Project by email\n");
 
@@ -289,6 +456,9 @@ int main(int argc, char *argv[])
 
   printf("Select email with prefix 'user'\n");
   select_email(&db);
+
+  printf("Performing cartesian product on users and shopping cart\n");
+  cartesian_product(&db);
 
   printf("Deleting user with id 0\n");
   delete_tuples(&db);

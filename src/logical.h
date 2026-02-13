@@ -447,6 +447,155 @@ RelationSelectError relation_select(
 
   return RELATION_SELECT_OK;
 }
+
+static size_t relation_data_names_end_offset(Relation relation)
+{
+  MemorySlice name = relation.names[relation.tuple_length - 1];
+  return name.offset + name.length;
+}
+
+static void relation_copy_names_and_types(
+    size_t *data_offset,
+    Relation *into,
+    size_t into_index,
+    Relation from,
+    size_t from_index)
+{
+  into->types[into_index] = from.types[from_index];
+
+  MemorySlice name = from.names[from_index];
+  into->names[into_index] = (MemorySlice){
+      .offset = *data_offset,
+      .length = name.length,
+  };
+
+  memory_copy_forward(
+      &into->data[*data_offset], &from.data[name.offset], name.length);
+
+  *data_offset += name.length;
+}
+
+static void relation_copy_values(
+    size_t *data_offset,
+    Relation *into,
+    size_t into_index,
+    Relation from,
+    size_t from_tuple)
+{
+  for (size_t i = 0; i < from.tuple_length; ++i)
+  {
+    ColumnValue2 *into_field = &into->values[into_index + i];
+    ColumnValue2 from_field = from.values[(from_tuple * from.tuple_length) + i];
+
+    switch (from.types[i])
+    {
+    case COLUMN_TYPE_INTEGER:
+      *into_field = from_field;
+      break;
+
+    case COLUMN_TYPE_STRING:
+    {
+      into_field->string = (MemorySlice){
+          .offset = *data_offset,
+          .length = from_field.string.length,
+      };
+      memory_copy_forward(
+          &into->data[*data_offset],
+          &from.data[from_field.string.offset],
+          from_field.string.length);
+      *data_offset += from_field.string.length;
+    }
+    break;
+    }
+  }
+}
+
+static AllocateError
+relation_cartesian_product(Relation lhs, Relation rhs, Relation *product)
+{
+  assert(product->tuple_length == 0);
+  assert(product->names == NULL);
+  assert(product->types == NULL);
+  assert(product->length == 0);
+  assert(product->values == NULL);
+  assert(product->data_length == 0);
+  assert(product->data == NULL);
+
+  *product = (Relation){
+      .length = lhs.length * rhs.length,
+      .tuple_length = (ColumnsLength)(lhs.tuple_length + rhs.tuple_length),
+      .names = NULL,
+      .types = NULL,
+      .values = NULL,
+      .data_length = relation_data_names_end_offset(lhs)
+                     + relation_data_names_end_offset(rhs)
+                     + ((lhs.data_length - relation_data_names_end_offset(lhs))
+                        * rhs.length)
+                     + ((rhs.data_length - relation_data_names_end_offset(rhs))
+                        * lhs.length),
+      .data = NULL,
+  };
+
+  {
+    size_t names_length = sizeof(*product->names) * product->tuple_length;
+    size_t types_length = sizeof(*product->types) * product->tuple_length;
+    size_t values_length =
+        sizeof(*product->values) * product->tuple_length * product->length;
+
+    if (allocate((void **)&product->names, names_length) != ALLOCATE_OK
+        || allocate((void **)&product->types, types_length) != ALLOCATE_OK
+        || allocate((void **)&product->values, values_length) != ALLOCATE_OK
+        || allocate(&product->data, product->data_length) != ALLOCATE_OK)
+    {
+      deallocate(product->names, names_length);
+      deallocate(product->types, types_length);
+      deallocate(product->values, values_length);
+      deallocate(product->data, product->data_length);
+
+      *product = (Relation){
+          .length = 0,
+          .tuple_length = 0,
+          .names = NULL,
+          .types = NULL,
+          .values = NULL,
+          .data_length = 0,
+          .data = NULL,
+      };
+
+      return ALLOCATE_OUT_OF_MEMORY;
+    }
+  }
+
+  size_t data_offset = 0;
+  for (size_t i = 0; i < lhs.tuple_length; ++i)
+  {
+    relation_copy_names_and_types(&data_offset, product, i, lhs, i);
+  }
+
+  for (size_t i = 0; i < rhs.tuple_length; ++i)
+  {
+    relation_copy_names_and_types(
+        &data_offset, product, lhs.tuple_length + i, rhs, i);
+  }
+
+  size_t tuple_index = 0;
+  for (size_t lhs_tuple = 0; lhs_tuple < lhs.length; ++lhs_tuple)
+  {
+    for (size_t rhs_tuple = 0; rhs_tuple < rhs.length;
+         ++rhs_tuple, ++tuple_index)
+    {
+      size_t into_index = tuple_index * product->tuple_length;
+      relation_copy_values(&data_offset, product, into_index, lhs, lhs_tuple);
+      relation_copy_values(
+          &data_offset, product, into_index + lhs.tuple_length, rhs, rhs_tuple);
+    }
+  }
+
+  assert(tuple_index == product->length);
+  assert(data_offset == product->data_length);
+
+  return ALLOCATE_OK;
+}
 // ----- Relation -----
 
 // ---------- Schema types ----------
