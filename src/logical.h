@@ -308,18 +308,33 @@ typedef enum
   PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL,
   PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL,
   PREDICATE_OPERATOR_GRANULAR_STRING_PREFIX_EQUAL,
+  PREDICATE_OPERATOR_GRANULAR_TWO_COLUMNS_EQUAL,
 } PredicateOperatorGranular;
 
 typedef enum
 {
-  PREDICATE_OPERATOR_EQUAL,
+  PREDICATE_OPERATOR_EQUAL_COLUMNS,
+  PREDICATE_OPERATOR_EQUAL_CONSTANT,
   PREDICATE_OPERATOR_STRING_PREFIX_EQUAL,
 } PredicateOperator;
 
 typedef struct
 {
   PredicateOperator operator;
-  ColumnValue value;
+  union
+  {
+    struct
+    {
+      StringSlice column_name;
+      ColumnValue value;
+    } constant;
+
+    struct
+    {
+      StringSlice lhs_column_name;
+      StringSlice rhs_column_name;
+    } two_columns;
+  };
 } Predicate;
 
 typedef enum
@@ -328,22 +343,28 @@ typedef enum
   RELATION_SELECT_COMPLETED_BUT_OUT_OF_MEMORY,
   RELATION_SELECT_COLUMN_NOT_FOUND,
   RELATION_SELECT_OPERATOR_TYPE_MISMATCH,
+  RELATION_COMPARING_COLUMNS_OF_DIFFERENT_TYPES,
 } RelationSelectError;
 
-static RelationSelectError relation_select(
-    Relation *relation, StringSlice column_name, Predicate predicate)
+static RelationSelectError
+relation_select(Relation *relation, Predicate predicate)
 {
-  ColumnsLength column_index = 0;
-  if (!relation_get_column_index(relation, column_name, &column_index))
-  {
-    return RELATION_SELECT_COLUMN_NOT_FOUND;
-  }
+  ColumnsLength constant_column_index = 0;
+  ColumnsLength lhs_column_index = 0;
+  ColumnsLength rhs_column_index = 0;
 
   PredicateOperatorGranular op = PREDICATE_OPERATOR_GRANULAR_INVALID;
   switch (predicate.operator)
   {
-  case PREDICATE_OPERATOR_EQUAL:
-    switch (relation->types[column_index])
+  case PREDICATE_OPERATOR_EQUAL_CONSTANT:
+  {
+    if (!relation_get_column_index(
+            relation, predicate.constant.column_name, &constant_column_index))
+    {
+      return RELATION_SELECT_COLUMN_NOT_FOUND;
+    }
+
+    switch (relation->types[constant_column_index])
     {
     case COLUMN_TYPE_INTEGER:
       op = PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL;
@@ -353,15 +374,51 @@ static RelationSelectError relation_select(
       op = PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL;
       break;
     }
-    break;
+  }
+  break;
 
   case PREDICATE_OPERATOR_STRING_PREFIX_EQUAL:
-    if (relation->types[column_index] != COLUMN_TYPE_STRING)
+  {
+    if (!relation_get_column_index(
+            relation, predicate.constant.column_name, &constant_column_index))
+    {
+      return RELATION_SELECT_COLUMN_NOT_FOUND;
+    }
+    if (relation->types[constant_column_index] != COLUMN_TYPE_STRING)
     {
       return RELATION_SELECT_OPERATOR_TYPE_MISMATCH;
     }
     op = PREDICATE_OPERATOR_GRANULAR_STRING_PREFIX_EQUAL;
-    break;
+  }
+  break;
+
+  case PREDICATE_OPERATOR_EQUAL_COLUMNS:
+  {
+    if (!relation_get_column_index(
+            relation, predicate.two_columns.lhs_column_name, &lhs_column_index))
+    {
+      return RELATION_SELECT_COLUMN_NOT_FOUND;
+    }
+
+    if (!relation_get_column_index(
+            relation, predicate.two_columns.rhs_column_name, &rhs_column_index))
+    {
+      return RELATION_SELECT_COLUMN_NOT_FOUND;
+    }
+
+    if (lhs_column_index == rhs_column_index)
+    {
+      return RELATION_SELECT_OK;
+    }
+
+    if (relation->types[lhs_column_index] != relation->types[rhs_column_index])
+    {
+      return RELATION_COMPARING_COLUMNS_OF_DIFFERENT_TYPES;
+    }
+
+    op = PREDICATE_OPERATOR_GRANULAR_TWO_COLUMNS_EQUAL;
+  }
+  break;
   }
 
   size_t length = 0;
@@ -371,8 +428,6 @@ static RelationSelectError relation_select(
     ColumnValue2 *tuple =
         relation->values + (relation->tuple_length * tuple_index);
 
-    ColumnValue2 *value = &tuple[column_index];
-
     bool32 keep = false;
     switch (op)
     {
@@ -381,25 +436,50 @@ static RelationSelectError relation_select(
       break;
 
     case PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL:
-      keep = value->integer == predicate.value.integer;
+      keep = tuple[constant_column_index].integer
+             == predicate.constant.value.integer;
       break;
 
     case PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL:
       keep = string_slice_eq(
           (StringSlice){
-              .length = value->string.length,
-              .data = &relation->data[value->string.offset],
+              .length = tuple[constant_column_index].string.length,
+              .data =
+                  &relation->data[tuple[constant_column_index].string.offset],
           },
-          predicate.value.string);
+          predicate.constant.value.string);
       break;
 
     case PREDICATE_OPERATOR_GRANULAR_STRING_PREFIX_EQUAL:
       keep = string_slice_prefix_eq(
           (StringSlice){
-              .length = value->string.length,
-              .data = &relation->data[value->string.offset],
+              .length = tuple[constant_column_index].string.length,
+              .data =
+                  &relation->data[tuple[constant_column_index].string.offset],
           },
-          predicate.value.string);
+          predicate.constant.value.string);
+      break;
+
+    case PREDICATE_OPERATOR_GRANULAR_TWO_COLUMNS_EQUAL:
+      switch (relation->types[lhs_column_index])
+      {
+      case COLUMN_TYPE_INTEGER:
+        keep =
+            tuple[lhs_column_index].integer == tuple[rhs_column_index].integer;
+        break;
+
+      case COLUMN_TYPE_STRING:
+        keep = string_slice_eq(
+            (StringSlice){
+                .length = tuple[lhs_column_index].string.length,
+                .data = &relation->data[tuple[lhs_column_index].string.offset],
+            },
+            (StringSlice){
+                .length = tuple[rhs_column_index].string.length,
+                .data = &relation->data[tuple[rhs_column_index].string.offset],
+            });
+        break;
+      }
       break;
     }
 
@@ -446,7 +526,8 @@ static RelationSelectError relation_select(
           break;
 
         case COLUMN_TYPE_STRING:
-          relation_update_variable_data(relation, &value->string, &data_offset);
+          relation_update_variable_data(
+              relation, &tuple[column_index].string, &data_offset);
           break;
         }
       }

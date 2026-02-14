@@ -349,10 +349,14 @@ static void select_id(Database *db)
   assert(
       relation_select(
           &relation,
-          string_slice_from_ptr(users_relation_names[0]),
           (Predicate){
-              .operator = PREDICATE_OPERATOR_EQUAL,
-              .value = {.integer = 0},
+              .operator = PREDICATE_OPERATOR_EQUAL_CONSTANT,
+              .constant =
+                  {
+                      .column_name =
+                          string_slice_from_ptr(users_relation_names[0]),
+                      .value.integer = 0,
+                  },
           })
       == RELATION_SELECT_OK);
   relation_print(relation);
@@ -369,10 +373,14 @@ static void select_email(Database *db)
   assert(
       relation_select(
           &relation,
-          string_slice_from_ptr(users_relation_names[1]),
           (Predicate){
               .operator = PREDICATE_OPERATOR_STRING_PREFIX_EQUAL,
-              .value = {.string = string_slice_from_ptr("user")},
+              .constant =
+                  {
+                      .column_name =
+                          string_slice_from_ptr(users_relation_names[1]),
+                      .value.string = string_slice_from_ptr("user"),
+                  },
           })
       == RELATION_SELECT_OK);
   relation_print(relation);
