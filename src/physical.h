@@ -407,9 +407,9 @@ typedef struct
   size_t block_index;
   size_t tuple_index;
   bool32 valid;
-} TupleIterator;
+} BlockTupleIterator;
 
-static TupleIterator memory_store_iterate(MemoryStore *store)
+static BlockTupleIterator memory_store_iterate(MemoryStore *store)
 {
   assert(store != NULL);
 
@@ -418,7 +418,7 @@ static TupleIterator memory_store_iterate(MemoryStore *store)
     Block block = memory_store_block(store, i);
     if (block.header->allocated_records > 0)
     {
-      return (TupleIterator){
+      return (BlockTupleIterator){
           .store = store,
           .block_index = i,
           .tuple_index = 0,
@@ -427,7 +427,7 @@ static TupleIterator memory_store_iterate(MemoryStore *store)
     }
   }
 
-  return (TupleIterator){
+  return (BlockTupleIterator){
       .store = store,
       .block_index = 0,
       .tuple_index = 0,
@@ -435,7 +435,7 @@ static TupleIterator memory_store_iterate(MemoryStore *store)
   };
 }
 
-static void tuple_iterator_next(TupleIterator *it)
+static void block_tuple_iterator_next(BlockTupleIterator *it)
 {
   assert(it != NULL);
 
@@ -454,8 +454,8 @@ static void tuple_iterator_next(TupleIterator *it)
   it->valid = false;
 }
 
-static ColumnValue tuple_iterator_get(
-    TupleIterator *it,
+static ColumnValue block_tuple_iterator_get(
+    BlockTupleIterator *it,
     const ColumnType *types,
     int64_t length,
     int16_t column_index)

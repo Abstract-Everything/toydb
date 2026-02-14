@@ -841,14 +841,14 @@ static AllocateError database_new(
 static bool32
 query_relation_id_by_name(Database db, StringSlice name, int64_t *id)
 {
-  for (TupleIterator i = memory_store_iterate(&db.relations); i.valid;
-       tuple_iterator_next(&i))
+  for (BlockTupleIterator i = memory_store_iterate(&db.relations); i.valid;
+       block_tuple_iterator_next(&i))
   {
-    ColumnValue tuple_name = tuple_iterator_get(
+    ColumnValue tuple_name = block_tuple_iterator_get(
         &i, relations_column_types, ARRAY_LENGTH(relations_column_types), 1);
     if (string_slice_eq(name, tuple_name.string))
     {
-      ColumnValue tuple_id = tuple_iterator_get(
+      ColumnValue tuple_id = block_tuple_iterator_get(
           &i, relations_column_types, ARRAY_LENGTH(relations_column_types), 0);
 
       *id = tuple_id.integer;
@@ -896,10 +896,10 @@ static DatabaseCreateTableError database_create_table(
   assert(length > 0);
 
   int64_t relation_id = 0;
-  for (TupleIterator i = memory_store_iterate(&db->relations); i.valid;
-       tuple_iterator_next(&i))
+  for (BlockTupleIterator i = memory_store_iterate(&db->relations); i.valid;
+       block_tuple_iterator_next(&i))
   {
-    ColumnValue value = tuple_iterator_get(
+    ColumnValue value = block_tuple_iterator_get(
         &i, relations_column_types, ARRAY_LENGTH(relations_column_types), 0);
 
     if (relation_id <= value.integer)
@@ -1208,10 +1208,11 @@ database_get_relation_column_metadata_(
   size_t tuple_length = 0;
   size_t largest_column_id = 0;
   size_t names_data_size = 0;
-  for (TupleIterator i = memory_store_iterate(&db->relation_columns); i.valid;
-       tuple_iterator_next(&i))
+  for (BlockTupleIterator i = memory_store_iterate(&db->relation_columns);
+       i.valid;
+       block_tuple_iterator_next(&i))
   {
-    ColumnValue tuple_relation_id = tuple_iterator_get(
+    ColumnValue tuple_relation_id = block_tuple_iterator_get(
         &i,
         relation_columns_column_types,
         ARRAY_LENGTH(relation_columns_column_types),
@@ -1222,13 +1223,13 @@ database_get_relation_column_metadata_(
       continue;
     }
 
-    ColumnValue column_id = tuple_iterator_get(
+    ColumnValue column_id = block_tuple_iterator_get(
         &i,
         relation_columns_column_types,
         ARRAY_LENGTH(relation_columns_column_types),
         1);
 
-    ColumnValue column_name = tuple_iterator_get(
+    ColumnValue column_name = block_tuple_iterator_get(
         &i,
         relation_columns_column_types,
         ARRAY_LENGTH(relation_columns_column_types),
@@ -1266,10 +1267,11 @@ database_get_relation_column_metadata_(
     return DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY;
   }
 
-  for (TupleIterator i = memory_store_iterate(&db->relation_columns); i.valid;
-       tuple_iterator_next(&i))
+  for (BlockTupleIterator i = memory_store_iterate(&db->relation_columns);
+       i.valid;
+       block_tuple_iterator_next(&i))
   {
-    ColumnValue tuple_relation_id = tuple_iterator_get(
+    ColumnValue tuple_relation_id = block_tuple_iterator_get(
         &i,
         relation_columns_column_types,
         ARRAY_LENGTH(relation_columns_column_types),
@@ -1280,7 +1282,7 @@ database_get_relation_column_metadata_(
       continue;
     }
 
-    ColumnValue column_id = tuple_iterator_get(
+    ColumnValue column_id = block_tuple_iterator_get(
         &i,
         relation_columns_column_types,
         ARRAY_LENGTH(relation_columns_column_types),
@@ -1288,7 +1290,7 @@ database_get_relation_column_metadata_(
 
     if (types != NULL)
     {
-      ColumnValue type = tuple_iterator_get(
+      ColumnValue type = block_tuple_iterator_get(
           &i,
           relation_columns_column_types,
           ARRAY_LENGTH(relation_columns_column_types),
@@ -1299,7 +1301,7 @@ database_get_relation_column_metadata_(
 
     if (names != NULL)
     {
-      ColumnValue name = tuple_iterator_get(
+      ColumnValue name = block_tuple_iterator_get(
           &i,
           relation_columns_column_types,
           ARRAY_LENGTH(relation_columns_column_types),
@@ -1518,9 +1520,9 @@ static DatabaseReadRelationError database_read_relation(
   }
 
   AllocateError status = ALLOCATE_OK;
-  for (TupleIterator i = memory_store_iterate(store);
+  for (BlockTupleIterator i = memory_store_iterate(store);
        i.valid && status == ALLOCATE_OK;
-       tuple_iterator_next(&i))
+       block_tuple_iterator_next(&i))
   {
     ColumnValue2 *tuple = NULL;
     status = relation_append_tuple(relation, &tuple);
@@ -1532,7 +1534,7 @@ static DatabaseReadRelationError database_read_relation(
 
     for (ColumnsLength column = 0; column < relation->tuple_length; ++column)
     {
-      ColumnValue field = tuple_iterator_get(
+      ColumnValue field = block_tuple_iterator_get(
           &i, relation->types, relation->tuple_length, column);
 
       switch (relation->types[column])
