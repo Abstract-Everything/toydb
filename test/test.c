@@ -56,6 +56,68 @@ static void relation_print(Relation relation)
   printf("\n\n");
 }
 
+static void query_iterator_print(QueryIterator query_it)
+{
+  TupleIterator *it = query_iterator_get_output_iterator(&query_it);
+  ColumnsLength tuple_length = tuple_iterator_tuple_length(it);
+  for (ColumnsLength i = 0; i < tuple_length; ++i)
+  {
+    StringSlice name = tuple_iterator_column_name(it, i);
+    printf("%.*s", (int)name.length, name.data);
+
+    if (i < tuple_length - 1)
+    {
+      printf(", ");
+    }
+  }
+
+  printf("\n---------\n");
+
+  for (; tuple_iterator_valid(it); tuple_iterator_next(it))
+  {
+    for (ColumnsLength column = 0; column < tuple_length; ++column)
+    {
+      ColumnValue value = tuple_iterator_column_value(it, column);
+
+      switch (tuple_iterator_column_type(it, column))
+      {
+      case COLUMN_TYPE_INTEGER:
+        printf("%ld", value.integer);
+        break;
+
+      case COLUMN_TYPE_STRING:
+        printf("%.*s", (int)value.string.length, value.string.data);
+        break;
+      }
+
+      if (column < tuple_length - 1)
+      {
+        printf(", ");
+      }
+    }
+    printf("\n");
+  }
+
+  printf("\n\n");
+}
+
+static void run_query(
+    Database *db,
+    size_t length,
+    QueryOperator *operators,
+    QueryParameter *parameters)
+{
+  QueryIterator it = {
+      .length = 0,
+      .iterators = NULL,
+  };
+  assert(
+      database_query(db, length, operators, parameters, &it)
+      == DATABASE_QUERY_OK);
+  query_iterator_print(it);
+  query_iterator_destroy(&it);
+}
+
 const ColumnType users_relation_types[] = {
     COLUMN_TYPE_INTEGER,
     COLUMN_TYPE_STRING,
@@ -413,6 +475,21 @@ static void cartesian_product(Database *db)
   relation_destroy(&product);
 }
 
+static void query_read(Database *db)
+{
+  QueryOperator operators[] = {
+      QUERY_OPERATOR_READ,
+  };
+
+  QueryParameter parameters[] = {
+      {.read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
+  };
+
+  STATIC_ASSERT(ARRAY_LENGTH(operators) == ARRAY_LENGTH(parameters));
+
+  run_query(db, ARRAY_LENGTH(operators), operators, parameters);
+}
+
 static void delete_tuples(Database *db)
 {
   const ColumnValue values[] = {
@@ -469,6 +546,9 @@ int main(int argc, char *argv[])
 
   printf("Performing cartesian product on users and shopping cart\n");
   cartesian_product(&db);
+
+  printf("Running basic queries: read users table\n");
+  query_read(&db);
 
   printf("Deleting user with id 0\n");
   delete_tuples(&db);

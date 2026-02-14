@@ -1062,6 +1062,61 @@ database_drop_table(Database *db, StringSlice name)
   return DATABASE_DROP_TABLE_OK;
 }
 
+static AllocateError allocate_column_table_name(
+    String *string, StringSlice relation_name, StringSlice column_name)
+{
+  if (string_from_string_slice(relation_name, string) != ALLOCATE_OK)
+  {
+    return ALLOCATE_OUT_OF_MEMORY;
+  }
+
+  if (string_append(string, string_slice_from_ptr(".")) != ALLOCATE_OK)
+  {
+    return ALLOCATE_OUT_OF_MEMORY;
+  }
+
+  return string_append(string, column_name);
+}
+
+// TODO: Get rid of one version of these functions
+static AllocateError database_get_static_relation_column_metadata2(
+    StringSlice relation_name,
+    ColumnsLength tuple_length,
+    const char *const *relation_names,
+    const ColumnType *relation_types,
+    ColumnType **types,
+    String **names)
+{
+  AllocateError status = ALLOCATE_OK;
+  if (allocate((void **)types, sizeof(**types) * tuple_length) != ALLOCATE_OK
+      || allocate((void **)names, sizeof(**names) * tuple_length)
+             != ALLOCATE_OK)
+  {
+    status = ALLOCATE_OUT_OF_MEMORY;
+  }
+
+  size_t column_index = 0;
+  for (; column_index < tuple_length && status == ALLOCATE_OK; ++column_index)
+  {
+    (*types)[column_index] = relation_types[column_index];
+    String *string = &(*names)[column_index];
+    status = allocate_column_table_name(
+        &(*names)[column_index],
+        relation_name,
+        string_slice_from_ptr(relation_names[column_index]));
+  }
+
+  if (status != ALLOCATE_OK)
+  {
+    for (size_t i = 0; i < column_index; ++i) { string_destroy(&(*names)[i]); }
+    deallocate(*types, sizeof(**types) * tuple_length);
+    deallocate(*names, sizeof(**names) * tuple_length);
+    return ALLOCATE_OUT_OF_MEMORY;
+  }
+
+  return ALLOCATE_OK;
+}
+
 static AllocateError database_get_static_relation_column_metadata(
     StringSlice relation_name,
     ColumnsLength tuple_length,
@@ -1128,6 +1183,176 @@ typedef enum
   DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY,
   DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND,
 } DatabaseGetRelationColumnMetadataError;
+
+static DatabaseGetRelationColumnMetadataError
+database_get_relation_column_metadata2(
+    Database *db,
+    StringSlice relation_name,
+    MemoryStore **store,
+    ColumnsLength *tuple_length_,
+    ColumnType **types,
+    String **names)
+{
+  assert(db != NULL);
+  assert(store != NULL);
+  assert(*store == NULL);
+  assert(tuple_length_ != NULL);
+  assert(*tuple_length_ == 0);
+  assert(types != NULL);
+  assert(names != NULL);
+
+  if (string_slice_eq(
+          relation_name, string_slice_from_ptr(relations_relation_name)))
+  {
+    ColumnsLength tuple_length = ARRAY_LENGTH(relations_column_types);
+
+    if (database_get_static_relation_column_metadata2(
+            relation_name,
+            tuple_length,
+            relations_column_names,
+            relations_column_types,
+            types,
+            names)
+        != ALLOCATE_OK)
+    {
+      return DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY;
+    }
+
+    *tuple_length_ = tuple_length;
+    *store = &db->relations;
+    return DATABASE_GET_RELATION_COLUMN_METADATA_OK;
+  }
+
+  if (string_slice_eq(
+          relation_name, string_slice_from_ptr(relation_columns_relation_name)))
+  {
+    ColumnsLength tuple_length = ARRAY_LENGTH(relation_columns_column_types);
+
+    if (database_get_static_relation_column_metadata2(
+            relation_name,
+            tuple_length,
+            relation_columns_column_names,
+            relation_columns_column_types,
+            types,
+            names)
+        != ALLOCATE_OK)
+    {
+      return DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY;
+    }
+
+    *tuple_length_ = tuple_length;
+    *store = &db->relation_columns;
+    return DATABASE_GET_RELATION_COLUMN_METADATA_OK;
+  }
+
+  int64_t relation_id = 0;
+  if (!query_relation_id_by_name(*db, relation_name, &relation_id))
+  {
+    return DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND;
+  }
+
+  size_t tuple_length = 0;
+  size_t largest_column_id = 0;
+  for (BlockTupleIterator i = memory_store_iterate(&db->relation_columns);
+       i.valid;
+       block_tuple_iterator_next(&i))
+  {
+    ColumnValue tuple_relation_id = block_tuple_iterator_get(
+        &i,
+        relation_columns_column_types,
+        ARRAY_LENGTH(relation_columns_column_types),
+        0);
+
+    if (tuple_relation_id.integer != relation_id)
+    {
+      continue;
+    }
+
+    ColumnValue column_id = block_tuple_iterator_get(
+        &i,
+        relation_columns_column_types,
+        ARRAY_LENGTH(relation_columns_column_types),
+        1);
+
+    largest_column_id = MAX(column_id.integer, largest_column_id);
+    tuple_length += 1;
+  }
+
+  // We don't allow relations without columns to exist
+  assert(tuple_length > 0);
+  assert(tuple_length == largest_column_id + 1);
+
+  if (allocate((void **)types, sizeof(**types) * tuple_length) != ALLOCATE_OK
+      || allocate((void **)names, sizeof(**names) * tuple_length)
+             != ALLOCATE_OK)
+  {
+    deallocate(*types, sizeof(**types) * tuple_length);
+    deallocate(*names, sizeof(**names) * tuple_length);
+    return DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY;
+  }
+
+  for (size_t i = 0; i < tuple_length; ++i)
+  {
+    (*names)[i] = (String){
+        .data = NULL,
+        .length = 0,
+    };
+  }
+
+  AllocateError status = ALLOCATE_OK;
+  for (BlockTupleIterator i = memory_store_iterate(&db->relation_columns);
+       i.valid && status == ALLOCATE_OK;
+       block_tuple_iterator_next(&i))
+  {
+    ColumnValue tuple_relation_id = block_tuple_iterator_get(
+        &i,
+        relation_columns_column_types,
+        ARRAY_LENGTH(relation_columns_column_types),
+        0);
+
+    if (tuple_relation_id.integer != relation_id)
+    {
+      continue;
+    }
+
+    ColumnValue column_id = block_tuple_iterator_get(
+        &i,
+        relation_columns_column_types,
+        ARRAY_LENGTH(relation_columns_column_types),
+        1);
+
+    ColumnValue type = block_tuple_iterator_get(
+        &i,
+        relation_columns_column_types,
+        ARRAY_LENGTH(relation_columns_column_types),
+        3);
+
+    (*types)[column_id.integer] = type.integer;
+
+    ColumnValue name = block_tuple_iterator_get(
+        &i,
+        relation_columns_column_types,
+        ARRAY_LENGTH(relation_columns_column_types),
+        2);
+
+    status = allocate_column_table_name(
+        &(*names)[column_id.integer], relation_name, name.string);
+  }
+
+  if (status != ALLOCATE_OK)
+  {
+    for (size_t i = 0; i < tuple_length; ++i) { string_destroy(&(*names)[i]); }
+    deallocate(*types, sizeof(**types) * tuple_length);
+    deallocate(*names, sizeof(**names) * tuple_length);
+    return DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY;
+  }
+
+  *tuple_length_ = (ColumnsLength)tuple_length;
+  *store =
+      &db->user_relations[find_user_relation_index(*db, relation_id)].store;
+
+  return DATABASE_GET_RELATION_COLUMN_METADATA_OK;
+}
 
 static DatabaseGetRelationColumnMetadataError
 database_get_relation_column_metadata_(
@@ -1559,6 +1784,237 @@ static DatabaseReadRelationError database_read_relation(
 
   return DATABASE_READ_RELATION_OK;
 }
+
+// ----- Query -----
+
+typedef enum
+{
+  QUERY_OPERATOR_READ,
+} QueryOperator;
+
+typedef union
+{
+  StringSlice read_relation_name;
+} QueryParameter;
+
+typedef enum
+{
+  TUPLE_ITERATOR_OK,
+  TUPLE_ITERATOR_SELECT_COLUMN_NOT_FOUND,
+  TUPLE_ITERATOR_SELECT_COLUMN_TYPE_MISMATCH,
+} TupleIteratorError;
+
+typedef struct TupleIterator
+{
+  QueryOperator operator;
+  union
+  {
+    struct
+    {
+      BlockTupleIterator it;
+      String *names;
+      ColumnType *types;
+      ColumnsLength tuple_length;
+    } read;
+  };
+} TupleIterator;
+
+void tuple_iterator_destroy(TupleIterator *it)
+{
+  switch (it->operator)
+  {
+  case QUERY_OPERATOR_READ:
+  {
+    for (size_t i = 0; i < it->read.tuple_length; ++i)
+    {
+      string_destroy(&it->read.names[i]);
+    }
+    deallocate(it->read.names, sizeof(*it->read.names) * it->read.tuple_length);
+    deallocate(it->read.types, sizeof(*it->read.types) * it->read.tuple_length);
+  }
+  break;
+  }
+}
+
+static TupleIterator read_tuple_iterator(
+    MemoryStore *store,
+    String *names,
+    ColumnType *types,
+    ColumnsLength tuple_length)
+{
+  return (TupleIterator){
+      .operator= QUERY_OPERATOR_READ,
+      .read =
+          {
+              .it = memory_store_iterate(store),
+              .names = names,
+              .types = types,
+              .tuple_length = tuple_length,
+          },
+  };
+}
+
+static ColumnsLength tuple_iterator_tuple_length(TupleIterator *it)
+{
+  switch (it->operator)
+  {
+  case QUERY_OPERATOR_READ:
+    return it->read.tuple_length;
+  }
+}
+
+static bool32 tuple_iterator_valid(TupleIterator *it)
+{
+  switch (it->operator)
+  {
+  case QUERY_OPERATOR_READ:
+    return it->read.it.valid;
+  }
+}
+
+static StringSlice
+tuple_iterator_column_name(TupleIterator *it, ColumnsLength column_id)
+{
+  switch (it->operator)
+  {
+  case QUERY_OPERATOR_READ:
+    assert(column_id < it->read.tuple_length);
+    return string_slice_from_string(it->read.names[column_id]);
+  }
+}
+
+static ColumnType
+tuple_iterator_column_type(TupleIterator *it, ColumnsLength column_id)
+{
+  switch (it->operator)
+  {
+  case QUERY_OPERATOR_READ:
+    assert(column_id < it->read.tuple_length);
+    return it->read.types[column_id];
+  }
+}
+
+static ColumnValue
+tuple_iterator_column_value(TupleIterator *it, ColumnsLength column_id)
+{
+  switch (it->operator)
+  {
+  case QUERY_OPERATOR_READ:
+    assert(column_id < it->read.tuple_length);
+    assert(tuple_iterator_valid(it));
+    return block_tuple_iterator_get(
+        &it->read.it, it->read.types, it->read.tuple_length, column_id);
+  }
+}
+
+static void tuple_iterator_next(TupleIterator *it)
+{
+  switch (it->operator)
+  {
+  case QUERY_OPERATOR_READ:
+    block_tuple_iterator_next(&it->read.it);
+    break;
+  }
+}
+
+typedef struct
+{
+  size_t length;
+  TupleIterator *iterators;
+} QueryIterator;
+
+typedef enum
+{
+  DATABASE_QUERY_OK,
+  DATABASE_QUERY_OUT_OF_MEMORY,
+  DATABASE_QUERY_RELATION_NOT_FOUND,
+} DatabaseQueryError;
+
+static DatabaseQueryError database_query(
+    Database *db,
+    size_t length,
+    const QueryOperator *operators,
+    const QueryParameter *parameters,
+    QueryIterator *it)
+{
+  // TODO: Make sure the dependendencies have no loops
+  assert(db != NULL);
+  assert(length > 0);
+  assert(operators != NULL);
+  assert(parameters != NULL);
+  assert(it != NULL);
+
+  TupleIterator *iterators = NULL;
+  if (allocate((void **)&iterators, sizeof(TupleIterator) * length)
+      != ALLOCATE_OK)
+  {
+    return DATABASE_QUERY_OUT_OF_MEMORY;
+  }
+
+  DatabaseQueryError status = DATABASE_QUERY_OK;
+  size_t i = 0;
+  for (; status == DATABASE_QUERY_OK && i < length; ++i)
+  {
+    switch (operators[i])
+    {
+    case QUERY_OPERATOR_READ:
+    {
+      MemoryStore *store = NULL;
+      ColumnsLength tuple_length = 0;
+      ColumnType *types = NULL;
+      String *names = NULL;
+      switch (database_get_relation_column_metadata2(
+          db,
+          parameters[i].read_relation_name,
+          &store,
+          &tuple_length,
+          &types,
+          &names))
+      {
+      case DATABASE_GET_RELATION_COLUMN_METADATA_OK:
+        iterators[i] = read_tuple_iterator(store, names, types, tuple_length);
+        break;
+
+      case DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY:
+        status = DATABASE_QUERY_OUT_OF_MEMORY;
+        break;
+
+      case DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND:
+        status = DATABASE_QUERY_RELATION_NOT_FOUND;
+        break;
+      }
+    }
+    break;
+    }
+  }
+
+  if (status != DATABASE_QUERY_OK)
+  {
+    for (size_t j = 0; j < i; ++j) { tuple_iterator_destroy(&iterators[j]); }
+    return status;
+  }
+
+  *it = (QueryIterator){
+      .length = length,
+      .iterators = iterators,
+  };
+  return DATABASE_QUERY_OK;
+}
+
+void query_iterator_destroy(QueryIterator *it)
+{
+  for (size_t i = 0; i < it->length; ++i)
+  {
+    tuple_iterator_destroy(&it->iterators[i]);
+  }
+}
+
+TupleIterator *query_iterator_get_output_iterator(QueryIterator *it)
+{
+  return &it->iterators[it->length - 1];
+}
+
+// ----- Query -----
 
 #define LOGICAL_H
 #endif
