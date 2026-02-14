@@ -125,6 +125,23 @@ static void relation_update_variable_data(
   *offset += slice->length;
 }
 
+static bool32
+match_column_names(StringSlice search_name, StringSlice column_name)
+{
+  StringSlice search_name_qualifier =
+      string_slice_find_past(search_name, RELATION_NAME_QUALIFIER);
+
+  StringSlice column_name_qualifier =
+      string_slice_find_past(column_name, RELATION_NAME_QUALIFIER);
+
+  assert(column_name_qualifier.data != NULL);
+
+  return (
+      (search_name_qualifier.data != NULL
+       && string_slice_eq(column_name, search_name))
+      || string_slice_eq(column_name_qualifier, search_name));
+}
+
 static bool32 relation_get_column_index(
     Relation *relation, StringSlice search_name, ColumnsLength *column_index)
 {
@@ -135,17 +152,7 @@ static bool32 relation_get_column_index(
         .data = &relation->data[relation->names[i].offset],
     };
 
-    StringSlice search_name_qualifier =
-        string_slice_find_past(search_name, RELATION_NAME_QUALIFIER);
-
-    StringSlice column_name_qualifier =
-        string_slice_find_past(column_name, RELATION_NAME_QUALIFIER);
-
-    assert(column_name_qualifier.data != NULL);
-
-    if ((search_name_qualifier.data != NULL
-         && string_slice_eq(column_name, search_name))
-        || string_slice_eq(column_name_qualifier, search_name))
+    if (match_column_names(search_name, column_name))
     {
       *column_index = i;
       return true;
@@ -1790,11 +1797,20 @@ static DatabaseReadRelationError database_read_relation(
 typedef enum
 {
   QUERY_OPERATOR_READ,
+  QUERY_OPERATOR_PROJECT,
 } QueryOperator;
+
+typedef struct
+{
+  size_t query_index;
+  StringSlice *column_names;
+  ColumnsLength tuple_length;
+} ProjectQueryParameter;
 
 typedef union
 {
   StringSlice read_relation_name;
+  ProjectQueryParameter project;
 } QueryParameter;
 
 typedef enum
@@ -1812,10 +1828,17 @@ typedef struct TupleIterator
     struct
     {
       BlockTupleIterator it;
-      String *names;
-      ColumnType *types;
       ColumnsLength tuple_length;
+      String *column_names;
+      ColumnType *column_types;
     } read;
+
+    struct
+    {
+      struct TupleIterator *it;
+      ColumnsLength tuple_length;
+      ColumnsLength *mapped_ids;
+    } project;
   };
 } TupleIterator;
 
@@ -1827,10 +1850,22 @@ void tuple_iterator_destroy(TupleIterator *it)
   {
     for (size_t i = 0; i < it->read.tuple_length; ++i)
     {
-      string_destroy(&it->read.names[i]);
+      string_destroy(&it->read.column_names[i]);
     }
-    deallocate(it->read.names, sizeof(*it->read.names) * it->read.tuple_length);
-    deallocate(it->read.types, sizeof(*it->read.types) * it->read.tuple_length);
+    deallocate(
+        it->read.column_names,
+        sizeof(*it->read.column_names) * it->read.tuple_length);
+    deallocate(
+        it->read.column_types,
+        sizeof(*it->read.column_types) * it->read.tuple_length);
+  }
+  break;
+
+  case QUERY_OPERATOR_PROJECT:
+  {
+    deallocate(
+        it->project.mapped_ids,
+        sizeof(it->project.mapped_ids) * it->project.tuple_length);
   }
   break;
   }
@@ -1847,9 +1882,23 @@ static TupleIterator read_tuple_iterator(
       .read =
           {
               .it = memory_store_iterate(store),
-              .names = names,
-              .types = types,
+              .column_names = names,
+              .column_types = types,
               .tuple_length = tuple_length,
+          },
+  };
+}
+
+static TupleIterator project_tuple_iterator(
+    TupleIterator *it, ColumnsLength tuple_length, ColumnsLength *mapped_ids)
+{
+  return (TupleIterator){
+      .operator= QUERY_OPERATOR_PROJECT,
+      .project =
+          {
+              .it = it,
+              .tuple_length = tuple_length,
+              .mapped_ids = mapped_ids,
           },
   };
 }
@@ -1860,6 +1909,9 @@ static ColumnsLength tuple_iterator_tuple_length(TupleIterator *it)
   {
   case QUERY_OPERATOR_READ:
     return it->read.tuple_length;
+
+  case QUERY_OPERATOR_PROJECT:
+    return it->project.tuple_length;
   }
 }
 
@@ -1869,41 +1921,59 @@ static bool32 tuple_iterator_valid(TupleIterator *it)
   {
   case QUERY_OPERATOR_READ:
     return it->read.it.valid;
+
+  case QUERY_OPERATOR_PROJECT:
+    return tuple_iterator_valid(it->project.it);
   }
 }
 
 static StringSlice
 tuple_iterator_column_name(TupleIterator *it, ColumnsLength column_id)
 {
+  assert(column_id < tuple_iterator_tuple_length(it));
+
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-    assert(column_id < it->read.tuple_length);
-    return string_slice_from_string(it->read.names[column_id]);
+    return string_slice_from_string(it->read.column_names[column_id]);
+
+  case QUERY_OPERATOR_PROJECT:
+    return tuple_iterator_column_name(
+        it->project.it, it->project.mapped_ids[column_id]);
   }
 }
 
 static ColumnType
 tuple_iterator_column_type(TupleIterator *it, ColumnsLength column_id)
 {
+  assert(column_id < tuple_iterator_tuple_length(it));
+
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-    assert(column_id < it->read.tuple_length);
-    return it->read.types[column_id];
+    return it->read.column_types[column_id];
+
+  case QUERY_OPERATOR_PROJECT:
+    return tuple_iterator_column_type(
+        it->project.it, it->project.mapped_ids[column_id]);
   }
 }
 
 static ColumnValue
 tuple_iterator_column_value(TupleIterator *it, ColumnsLength column_id)
 {
+  assert(tuple_iterator_valid(it));
+  assert(column_id < tuple_iterator_tuple_length(it));
+
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-    assert(column_id < it->read.tuple_length);
-    assert(tuple_iterator_valid(it));
     return block_tuple_iterator_get(
-        &it->read.it, it->read.types, it->read.tuple_length, column_id);
+        &it->read.it, it->read.column_types, it->read.tuple_length, column_id);
+
+  case QUERY_OPERATOR_PROJECT:
+    return tuple_iterator_column_value(
+        it->project.it, it->project.mapped_ids[column_id]);
   }
 }
 
@@ -1913,6 +1983,10 @@ static void tuple_iterator_next(TupleIterator *it)
   {
   case QUERY_OPERATOR_READ:
     block_tuple_iterator_next(&it->read.it);
+    break;
+
+  case QUERY_OPERATOR_PROJECT:
+    tuple_iterator_next(it->project.it);
     break;
   }
 }
@@ -1952,10 +2026,10 @@ static DatabaseQueryError database_query(
   }
 
   DatabaseQueryError status = DATABASE_QUERY_OK;
-  size_t i = 0;
-  for (; status == DATABASE_QUERY_OK && i < length; ++i)
+  size_t query = 0;
+  for (; status == DATABASE_QUERY_OK && query < length; ++query)
   {
-    switch (operators[i])
+    switch (operators[query])
     {
     case QUERY_OPERATOR_READ:
     {
@@ -1965,14 +2039,15 @@ static DatabaseQueryError database_query(
       String *names = NULL;
       switch (database_get_relation_column_metadata2(
           db,
-          parameters[i].read_relation_name,
+          parameters[query].read_relation_name,
           &store,
           &tuple_length,
           &types,
           &names))
       {
       case DATABASE_GET_RELATION_COLUMN_METADATA_OK:
-        iterators[i] = read_tuple_iterator(store, names, types, tuple_length);
+        iterators[query] =
+            read_tuple_iterator(store, names, types, tuple_length);
         break;
 
       case DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY:
@@ -1985,12 +2060,57 @@ static DatabaseQueryError database_query(
       }
     }
     break;
+
+    case QUERY_OPERATOR_PROJECT:
+    {
+      ProjectQueryParameter project = parameters[query].project;
+      assert(project.query_index < query);
+
+      ColumnsLength *mapped_ids = NULL;
+      if (allocate(
+              (void **)&mapped_ids, sizeof(*mapped_ids) * project.tuple_length)
+          != ALLOCATE_OK)
+      {
+        status = DATABASE_QUERY_OUT_OF_MEMORY;
+        break;
+      }
+
+      bool32 found = true;
+      TupleIterator *iter = &iterators[project.query_index];
+      for (ColumnsLength i = 0; i < project.tuple_length && found; ++i)
+      {
+        for (ColumnsLength j = 0; j < tuple_iterator_tuple_length(iter); ++j)
+        {
+          if (match_column_names(
+                  project.column_names[i], tuple_iterator_column_name(iter, j)))
+          {
+            mapped_ids[i] = j;
+            found = true;
+            break;
+          }
+        }
+      }
+
+      if (!found)
+      {
+        deallocate(mapped_ids, sizeof(*mapped_ids) * project.tuple_length);
+        status = DATABASE_QUERY_OUT_OF_MEMORY;
+        break;
+      }
+
+      iterators[query] =
+          project_tuple_iterator(iter, project.tuple_length, mapped_ids);
+    }
+    break;
     }
   }
 
   if (status != DATABASE_QUERY_OK)
   {
-    for (size_t j = 0; j < i; ++j) { tuple_iterator_destroy(&iterators[j]); }
+    for (size_t j = 0; j < query; ++j)
+    {
+      tuple_iterator_destroy(&iterators[j]);
+    }
     return status;
   }
 

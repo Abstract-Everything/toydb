@@ -490,6 +490,57 @@ static void query_read(Database *db)
   run_query(db, ARRAY_LENGTH(operators), operators, parameters);
 }
 
+static void query_project_by_id(Database *db)
+{
+  StringSlice project_columns[] = {
+      string_slice_from_ptr(users_relation_names[0]),
+  };
+
+  QueryOperator operators[] = {
+      QUERY_OPERATOR_READ,
+      QUERY_OPERATOR_PROJECT,
+  };
+
+  QueryParameter parameters[] = {
+      {.read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
+      {.project =
+           {
+               .query_index = 0,
+               .column_names = project_columns,
+               .tuple_length = ARRAY_LENGTH(project_columns),
+           }},
+  };
+
+  STATIC_ASSERT(ARRAY_LENGTH(operators) == ARRAY_LENGTH(parameters));
+
+  run_query(db, ARRAY_LENGTH(operators), operators, parameters);
+}
+
+static void query_project_by_email(Database *db)
+{
+  StringSlice project_columns[] = {
+      string_slice_from_ptr(users_relation_names[1]),
+  };
+
+  QueryOperator operators[] = {
+      QUERY_OPERATOR_READ,
+      QUERY_OPERATOR_PROJECT,
+  };
+
+  QueryParameter parameters[] = {
+      {.read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
+      {.project =
+           {
+               .query_index = 0,
+               .column_names = project_columns,
+               .tuple_length = ARRAY_LENGTH(project_columns),
+           }},
+  };
+
+  STATIC_ASSERT(ARRAY_LENGTH(operators) == ARRAY_LENGTH(parameters));
+  run_query(db, ARRAY_LENGTH(operators), operators, parameters);
+}
+
 static void delete_tuples(Database *db)
 {
   const ColumnValue values[] = {
@@ -549,6 +600,12 @@ int main(int argc, char *argv[])
 
   printf("Running basic queries: read users table\n");
   query_read(&db);
+
+  printf("Running basic queries: project by id\n");
+  query_project_by_id(&db);
+
+  printf("Running basic queries: project by email\n");
+  query_project_by_email(&db);
 
   printf("Deleting user with id 0\n");
   delete_tuples(&db);
