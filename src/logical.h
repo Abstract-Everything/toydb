@@ -1798,6 +1798,7 @@ typedef enum
 {
   QUERY_OPERATOR_READ,
   QUERY_OPERATOR_PROJECT,
+  QUERY_OPERATOR_SELECT,
 } QueryOperator;
 
 typedef struct
@@ -1807,10 +1808,17 @@ typedef struct
   ColumnsLength tuple_length;
 } ProjectQueryParameter;
 
+typedef struct
+{
+  size_t query_index;
+  Predicate predicate;
+} SelectQueryParameter;
+
 typedef union
 {
   StringSlice read_relation_name;
   ProjectQueryParameter project;
+  SelectQueryParameter select;
 } QueryParameter;
 
 typedef enum
@@ -1819,6 +1827,21 @@ typedef enum
   TUPLE_ITERATOR_SELECT_COLUMN_NOT_FOUND,
   TUPLE_ITERATOR_SELECT_COLUMN_TYPE_MISMATCH,
 } TupleIteratorError;
+
+typedef union
+{
+  struct
+  {
+    ColumnsLength column_index;
+    ColumnValue value;
+  } constant;
+
+  struct
+  {
+    ColumnsLength lhs_column_index;
+    ColumnsLength rhs_column_index;
+  } two_columns;
+} TupleIteratorSelectPredicate;
 
 typedef struct TupleIterator
 {
@@ -1839,6 +1862,13 @@ typedef struct TupleIterator
       ColumnsLength tuple_length;
       ColumnsLength *mapped_ids;
     } project;
+
+    struct
+    {
+      struct TupleIterator *it;
+      PredicateOperatorGranular operator;
+      TupleIteratorSelectPredicate predicate;
+    } select;
   };
 } TupleIterator;
 
@@ -1868,6 +1898,9 @@ void tuple_iterator_destroy(TupleIterator *it)
         sizeof(it->project.mapped_ids) * it->project.tuple_length);
   }
   break;
+
+  case QUERY_OPERATOR_SELECT:
+    break;
   }
 }
 
@@ -1903,6 +1936,22 @@ static TupleIterator project_tuple_iterator(
   };
 }
 
+static TupleIterator select_tuple_iterator(
+    TupleIterator *it,
+    PredicateOperatorGranular operator,
+    TupleIteratorSelectPredicate predicate)
+{
+  return (TupleIterator){
+      .operator= QUERY_OPERATOR_SELECT,
+      .select =
+          {
+              .it = it,
+              .operator= operator,
+              .predicate = predicate,
+          },
+  };
+}
+
 static ColumnsLength tuple_iterator_tuple_length(TupleIterator *it)
 {
   switch (it->operator)
@@ -1912,6 +1961,9 @@ static ColumnsLength tuple_iterator_tuple_length(TupleIterator *it)
 
   case QUERY_OPERATOR_PROJECT:
     return it->project.tuple_length;
+
+  case QUERY_OPERATOR_SELECT:
+    return tuple_iterator_tuple_length(it->select.it);
   }
 }
 
@@ -1924,6 +1976,9 @@ static bool32 tuple_iterator_valid(TupleIterator *it)
 
   case QUERY_OPERATOR_PROJECT:
     return tuple_iterator_valid(it->project.it);
+
+  case QUERY_OPERATOR_SELECT:
+    return tuple_iterator_valid(it->select.it);
   }
 }
 
@@ -1940,6 +1995,9 @@ tuple_iterator_column_name(TupleIterator *it, ColumnsLength column_id)
   case QUERY_OPERATOR_PROJECT:
     return tuple_iterator_column_name(
         it->project.it, it->project.mapped_ids[column_id]);
+
+  case QUERY_OPERATOR_SELECT:
+    return tuple_iterator_column_name(it->select.it, column_id);
   }
 }
 
@@ -1956,6 +2014,9 @@ tuple_iterator_column_type(TupleIterator *it, ColumnsLength column_id)
   case QUERY_OPERATOR_PROJECT:
     return tuple_iterator_column_type(
         it->project.it, it->project.mapped_ids[column_id]);
+
+  case QUERY_OPERATOR_SELECT:
+    return tuple_iterator_column_type(it->select.it, column_id);
   }
 }
 
@@ -1974,6 +2035,63 @@ tuple_iterator_column_value(TupleIterator *it, ColumnsLength column_id)
   case QUERY_OPERATOR_PROJECT:
     return tuple_iterator_column_value(
         it->project.it, it->project.mapped_ids[column_id]);
+
+  case QUERY_OPERATOR_SELECT:
+    return tuple_iterator_column_value(it->select.it, column_id);
+  }
+}
+
+bool32 tuple_iterator_select_tuple(TupleIterator *it)
+{
+  switch (it->select.operator)
+  {
+  case PREDICATE_OPERATOR_GRANULAR_INVALID:
+    assert(false);
+    return false;
+
+  case PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL:
+    return tuple_iterator_column_value(
+               it->select.it, it->select.predicate.constant.column_index)
+               .integer
+           == it->select.predicate.constant.value.integer;
+
+  case PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL:
+    return string_slice_eq(
+        tuple_iterator_column_value(
+            it->select.it, it->select.predicate.constant.column_index)
+            .string,
+        it->select.predicate.constant.value.string);
+
+  case PREDICATE_OPERATOR_GRANULAR_STRING_PREFIX_EQUAL:
+    return string_slice_prefix_eq(
+        tuple_iterator_column_value(
+            it->select.it, it->select.predicate.constant.column_index)
+            .string,
+        it->select.predicate.constant.value.string);
+
+  case PREDICATE_OPERATOR_GRANULAR_TWO_COLUMNS_EQUAL:
+    switch (tuple_iterator_column_type(
+        it->select.it, it->select.predicate.constant.column_index))
+    {
+    case COLUMN_TYPE_INTEGER:
+      return tuple_iterator_column_value(
+                 it->select.it,
+                 it->select.predicate.two_columns.lhs_column_index)
+                 .integer
+             == tuple_iterator_column_value(
+                    it->select.it,
+                    it->select.predicate.two_columns.rhs_column_index)
+                    .integer;
+
+    case COLUMN_TYPE_STRING:
+      return string_slice_eq(
+          tuple_iterator_column_value(
+              it->select.it, it->select.predicate.two_columns.lhs_column_index)
+              .string,
+          tuple_iterator_column_value(
+              it->select.it, it->select.predicate.two_columns.rhs_column_index)
+              .string);
+    }
   }
 }
 
@@ -1988,7 +2106,57 @@ static void tuple_iterator_next(TupleIterator *it)
   case QUERY_OPERATOR_PROJECT:
     tuple_iterator_next(it->project.it);
     break;
+
+  case QUERY_OPERATOR_SELECT:
+  {
+    for (tuple_iterator_next(it->select.it);
+         tuple_iterator_valid(it->select.it)
+         && !tuple_iterator_select_tuple(it);
+         tuple_iterator_next(it->select.it))
+    {
+    }
   }
+  break;
+  }
+}
+
+static void tuple_iterator_reset(TupleIterator *it)
+{
+  switch (it->operator)
+  {
+  case QUERY_OPERATOR_READ:
+    it->read.it = memory_store_iterate(it->read.it.store);
+    break;
+
+  case QUERY_OPERATOR_PROJECT:
+    tuple_iterator_reset(it->project.it);
+    break;
+
+  case QUERY_OPERATOR_SELECT:
+  {
+    tuple_iterator_reset(it->select.it);
+    if (!tuple_iterator_select_tuple(it))
+    {
+      tuple_iterator_next(it);
+    }
+  }
+  break;
+  }
+}
+
+bool32 tuple_iterator_find_column_name(
+    TupleIterator *it, StringSlice column_name, ColumnsLength *column_id)
+{
+  for (ColumnsLength i = 0; i < tuple_iterator_tuple_length(it); ++i)
+  {
+    if (match_column_names(column_name, tuple_iterator_column_name(it, i)))
+    {
+      *column_id = i;
+      return true;
+    }
+  }
+
+  return false;
 }
 
 typedef struct
@@ -2002,6 +2170,8 @@ typedef enum
   DATABASE_QUERY_OK,
   DATABASE_QUERY_OUT_OF_MEMORY,
   DATABASE_QUERY_RELATION_NOT_FOUND,
+  DATABASE_QUERY_COLUMN_NOT_FOUND,
+  DATABASE_QUERY_OPERATOR_TYPE_MISMATCH,
 } DatabaseQueryError;
 
 static DatabaseQueryError database_query(
@@ -2079,22 +2249,16 @@ static DatabaseQueryError database_query(
       TupleIterator *iter = &iterators[project.query_index];
       for (ColumnsLength i = 0; i < project.tuple_length && found; ++i)
       {
-        for (ColumnsLength j = 0; j < tuple_iterator_tuple_length(iter); ++j)
-        {
-          if (match_column_names(
-                  project.column_names[i], tuple_iterator_column_name(iter, j)))
-          {
-            mapped_ids[i] = j;
-            found = true;
-            break;
-          }
-        }
+        ColumnsLength column_id = 0;
+        found = tuple_iterator_find_column_name(
+            iter, project.column_names[i], &column_id);
+        mapped_ids[i] = column_id;
       }
 
       if (!found)
       {
         deallocate(mapped_ids, sizeof(*mapped_ids) * project.tuple_length);
-        status = DATABASE_QUERY_OUT_OF_MEMORY;
+        status = DATABASE_QUERY_COLUMN_NOT_FOUND;
         break;
       }
 
@@ -2102,12 +2266,104 @@ static DatabaseQueryError database_query(
           project_tuple_iterator(iter, project.tuple_length, mapped_ids);
     }
     break;
+
+    case QUERY_OPERATOR_SELECT:
+    {
+      SelectQueryParameter select = parameters[query].select;
+      TupleIterator *iter = &iterators[select.query_index];
+      PredicateOperatorGranular op = PREDICATE_OPERATOR_GRANULAR_INVALID;
+      TupleIteratorSelectPredicate predicate;
+      switch (select.predicate.operator)
+      {
+      case PREDICATE_OPERATOR_EQUAL_CONSTANT:
+      {
+        if (!tuple_iterator_find_column_name(
+                iter,
+                select.predicate.constant.column_name,
+                &predicate.constant.column_index))
+        {
+          status = DATABASE_QUERY_COLUMN_NOT_FOUND;
+          break;
+        }
+
+        predicate.constant.value = select.predicate.constant.value;
+
+        switch (
+            tuple_iterator_column_type(iter, predicate.constant.column_index))
+        {
+        case COLUMN_TYPE_INTEGER:
+          op = PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL;
+          break;
+
+        case COLUMN_TYPE_STRING:
+          op = PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL;
+          break;
+        }
+      }
+      break;
+
+      case PREDICATE_OPERATOR_STRING_PREFIX_EQUAL:
+      {
+        if (!tuple_iterator_find_column_name(
+                iter,
+                select.predicate.constant.column_name,
+                &predicate.constant.column_index))
+        {
+          status = DATABASE_QUERY_COLUMN_NOT_FOUND;
+          break;
+        }
+
+        predicate.constant.value = select.predicate.constant.value;
+
+        if (tuple_iterator_column_type(iter, predicate.constant.column_index)
+            != COLUMN_TYPE_STRING)
+        {
+          status = DATABASE_QUERY_OPERATOR_TYPE_MISMATCH;
+          break;
+        }
+
+        op = PREDICATE_OPERATOR_GRANULAR_STRING_PREFIX_EQUAL;
+      }
+      break;
+
+      case PREDICATE_OPERATOR_EQUAL_COLUMNS:
+      {
+        if (!tuple_iterator_find_column_name(
+                iter,
+                select.predicate.two_columns.lhs_column_name,
+                &predicate.two_columns.lhs_column_index))
+        {
+          status = DATABASE_QUERY_COLUMN_NOT_FOUND;
+          break;
+        }
+
+        if (!tuple_iterator_find_column_name(
+                iter,
+                select.predicate.two_columns.rhs_column_name,
+                &predicate.two_columns.rhs_column_index))
+        {
+          status = DATABASE_QUERY_COLUMN_NOT_FOUND;
+          break;
+        }
+
+        op = PREDICATE_OPERATOR_GRANULAR_TWO_COLUMNS_EQUAL;
+      }
+      break;
+      }
+
+      if (status == DATABASE_QUERY_OK)
+      {
+        iterators[query] = select_tuple_iterator(iter, op, predicate);
+      }
+    }
+    break;
     }
   }
 
   if (status != DATABASE_QUERY_OK)
   {
-    for (size_t j = 0; j < query; ++j)
+    // Last query is not initialized
+    for (size_t j = 0; j < query - 1; ++j)
     {
       tuple_iterator_destroy(&iterators[j]);
     }
@@ -2118,6 +2374,12 @@ static DatabaseQueryError database_query(
       .length = length,
       .iterators = iterators,
   };
+
+  // The first tuple may not be valid for some iterators, such as select. This
+  // way each iterators starts in a good state without having to account for it
+  // into the initialization code above
+  tuple_iterator_reset(&it->iterators[it->length - 1]);
+
   return DATABASE_QUERY_OK;
 }
 

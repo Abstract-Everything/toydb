@@ -541,6 +541,39 @@ static void query_project_by_email(Database *db)
   run_query(db, ARRAY_LENGTH(operators), operators, parameters);
 }
 
+static void query_select_email(Database *db)
+{
+  StringSlice project_columns[] = {
+      string_slice_from_ptr(users_relation_names[1]),
+  };
+
+  QueryOperator operators[] = {
+      QUERY_OPERATOR_READ,
+      QUERY_OPERATOR_SELECT,
+  };
+
+  QueryParameter parameters[] = {
+      {.read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
+      {.select =
+           {
+               .query_index = 0,
+               .predicate =
+                   {
+                       .operator = PREDICATE_OPERATOR_STRING_PREFIX_EQUAL,
+                       .constant =
+                           {
+                               .column_name = string_slice_from_ptr(
+                                   users_relation_names[1]),
+                               .value.string = string_slice_from_ptr("user"),
+                           },
+                   },
+           }},
+  };
+
+  STATIC_ASSERT(ARRAY_LENGTH(operators) == ARRAY_LENGTH(parameters));
+  run_query(db, ARRAY_LENGTH(operators), operators, parameters);
+}
+
 static void delete_tuples(Database *db)
 {
   const ColumnValue values[] = {
@@ -606,6 +639,9 @@ int main(int argc, char *argv[])
 
   printf("Running basic queries: project by email\n");
   query_project_by_email(&db);
+
+  printf("Running basic queries: select email with prefix 'user'\n");
+  query_select_email(&db);
 
   printf("Deleting user with id 0\n");
   delete_tuples(&db);
