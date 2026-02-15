@@ -1799,6 +1799,7 @@ typedef enum
   QUERY_OPERATOR_READ,
   QUERY_OPERATOR_PROJECT,
   QUERY_OPERATOR_SELECT,
+  QUERY_OPERATOR_CARTESIAN_PRODUCT,
 } QueryOperator;
 
 typedef struct
@@ -1814,11 +1815,18 @@ typedef struct
   Predicate predicate;
 } SelectQueryParameter;
 
+typedef struct
+{
+  size_t lhs_index;
+  size_t rhs_index;
+} CartesianProductQueryParameter;
+
 typedef union
 {
   StringSlice read_relation_name;
   ProjectQueryParameter project;
   SelectQueryParameter select;
+  CartesianProductQueryParameter cartesian_product;
 } QueryParameter;
 
 typedef enum
@@ -1869,6 +1877,12 @@ typedef struct TupleIterator
       PredicateOperatorGranular operator;
       TupleIteratorSelectPredicate predicate;
     } select;
+
+    struct
+    {
+      struct TupleIterator *lhs;
+      struct TupleIterator *rhs;
+    } cartesian_product;
   };
 } TupleIterator;
 
@@ -1900,6 +1914,7 @@ void tuple_iterator_destroy(TupleIterator *it)
   break;
 
   case QUERY_OPERATOR_SELECT:
+  case QUERY_OPERATOR_CARTESIAN_PRODUCT:
     break;
   }
 }
@@ -1952,6 +1967,15 @@ static TupleIterator select_tuple_iterator(
   };
 }
 
+static TupleIterator
+cartesian_product_tuple_iterator(TupleIterator *lhs, TupleIterator *rhs)
+{
+  return (TupleIterator){
+      .operator= QUERY_OPERATOR_CARTESIAN_PRODUCT,
+      .cartesian_product = {.lhs = lhs, .rhs = rhs},
+  };
+}
+
 static ColumnsLength tuple_iterator_tuple_length(TupleIterator *it)
 {
   switch (it->operator)
@@ -1964,6 +1988,15 @@ static ColumnsLength tuple_iterator_tuple_length(TupleIterator *it)
 
   case QUERY_OPERATOR_SELECT:
     return tuple_iterator_tuple_length(it->select.it);
+
+  case QUERY_OPERATOR_CARTESIAN_PRODUCT:
+  {
+    ColumnsLength lhs_length =
+        tuple_iterator_tuple_length(it->cartesian_product.lhs);
+    ColumnsLength rhs_length =
+        tuple_iterator_tuple_length(it->cartesian_product.rhs);
+    return (ColumnsLength)(lhs_length + rhs_length);
+  }
   }
 }
 
@@ -1979,7 +2012,26 @@ static bool32 tuple_iterator_valid(TupleIterator *it)
 
   case QUERY_OPERATOR_SELECT:
     return tuple_iterator_valid(it->select.it);
+
+  case QUERY_OPERATOR_CARTESIAN_PRODUCT:
+    return tuple_iterator_valid(it->cartesian_product.lhs);
   }
+}
+
+void cartesian_product_tuple_iterator_get_target_iterator_and_column_id(
+    TupleIterator *it, TupleIterator **target_it, ColumnsLength *column_id)
+{
+  ColumnsLength lhs_tuple_length =
+      tuple_iterator_tuple_length(it->cartesian_product.lhs);
+
+  if (*column_id < lhs_tuple_length)
+  {
+    *target_it = it->cartesian_product.lhs;
+    return;
+  }
+
+  *column_id = (ColumnsLength)(*column_id - lhs_tuple_length);
+  *target_it = it->cartesian_product.rhs;
 }
 
 static StringSlice
@@ -1998,6 +2050,15 @@ tuple_iterator_column_name(TupleIterator *it, ColumnsLength column_id)
 
   case QUERY_OPERATOR_SELECT:
     return tuple_iterator_column_name(it->select.it, column_id);
+
+  case QUERY_OPERATOR_CARTESIAN_PRODUCT:
+  {
+    TupleIterator *target_it = NULL;
+    cartesian_product_tuple_iterator_get_target_iterator_and_column_id(
+        it, &target_it, &column_id);
+
+    return tuple_iterator_column_name(target_it, column_id);
+  }
   }
 }
 
@@ -2017,6 +2078,15 @@ tuple_iterator_column_type(TupleIterator *it, ColumnsLength column_id)
 
   case QUERY_OPERATOR_SELECT:
     return tuple_iterator_column_type(it->select.it, column_id);
+
+  case QUERY_OPERATOR_CARTESIAN_PRODUCT:
+  {
+    TupleIterator *target_it = NULL;
+    cartesian_product_tuple_iterator_get_target_iterator_and_column_id(
+        it, &target_it, &column_id);
+
+    return tuple_iterator_column_type(target_it, column_id);
+  }
   }
 }
 
@@ -2038,6 +2108,15 @@ tuple_iterator_column_value(TupleIterator *it, ColumnsLength column_id)
 
   case QUERY_OPERATOR_SELECT:
     return tuple_iterator_column_value(it->select.it, column_id);
+
+  case QUERY_OPERATOR_CARTESIAN_PRODUCT:
+  {
+    TupleIterator *target_it = NULL;
+    cartesian_product_tuple_iterator_get_target_iterator_and_column_id(
+        it, &target_it, &column_id);
+
+    return tuple_iterator_column_value(target_it, column_id);
+  }
   }
 }
 
@@ -2095,6 +2174,8 @@ bool32 tuple_iterator_select_tuple(TupleIterator *it)
   }
 }
 
+static void tuple_iterator_reset(TupleIterator *it);
+
 static void tuple_iterator_next(TupleIterator *it)
 {
   switch (it->operator)
@@ -2114,6 +2195,17 @@ static void tuple_iterator_next(TupleIterator *it)
          && !tuple_iterator_select_tuple(it);
          tuple_iterator_next(it->select.it))
     {
+    }
+  }
+  break;
+
+  case QUERY_OPERATOR_CARTESIAN_PRODUCT:
+  {
+    tuple_iterator_next(it->cartesian_product.rhs);
+    if (!tuple_iterator_valid(it->cartesian_product.rhs))
+    {
+      tuple_iterator_reset(it->cartesian_product.rhs);
+      tuple_iterator_next(it->cartesian_product.lhs);
     }
   }
   break;
@@ -2139,6 +2231,13 @@ static void tuple_iterator_reset(TupleIterator *it)
     {
       tuple_iterator_next(it);
     }
+  }
+  break;
+
+  case QUERY_OPERATOR_CARTESIAN_PRODUCT:
+  {
+    tuple_iterator_reset(it->cartesian_product.rhs);
+    tuple_iterator_reset(it->cartesian_product.lhs);
   }
   break;
   }
@@ -2355,6 +2454,16 @@ static DatabaseQueryError database_query(
       {
         iterators[query] = select_tuple_iterator(iter, op, predicate);
       }
+    }
+    break;
+
+    case QUERY_OPERATOR_CARTESIAN_PRODUCT:
+    {
+      CartesianProductQueryParameter cartesian_product =
+          parameters[query].cartesian_product;
+      iterators[query] = cartesian_product_tuple_iterator(
+          &iterators[cartesian_product.lhs_index],
+          &iterators[cartesian_product.rhs_index]);
     }
     break;
     }
