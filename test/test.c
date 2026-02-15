@@ -6,56 +6,6 @@
 #define USERS_TABLE_NAME "users"
 #define SHOPPING_CART_TABLE_NAME "shopping_cart"
 
-static void relation_print(Relation relation)
-{
-
-  for (ColumnsLength i = 0; i < relation.tuple_length; ++i)
-  {
-    printf(
-        "%.*s",
-        (int)relation.names[i].length,
-        (char *)&relation.data[relation.names[i].offset]);
-    if (i < relation.tuple_length - 1)
-    {
-      printf(", ");
-    }
-  }
-
-  printf("\n---------\n");
-
-  for (size_t tuple_index = 0; tuple_index < relation.length; ++tuple_index)
-  {
-    ColumnValue2 *tuple =
-        (tuple_index * relation.tuple_length) + relation.values;
-
-    for (ColumnsLength column = 0; column < relation.tuple_length; ++column)
-    {
-      switch (relation.types[column])
-      {
-      case COLUMN_TYPE_INTEGER:
-        printf("%ld", tuple[column].integer);
-        break;
-
-      case COLUMN_TYPE_STRING:
-        printf(
-            "%.*s",
-            (int)tuple[column].string.length,
-            (char *)&relation.data[tuple[column].string.offset]);
-        break;
-      }
-
-      if (column < relation.tuple_length - 1)
-      {
-        printf(", ");
-      }
-    }
-
-    printf("\n");
-  }
-
-  printf("\n\n");
-}
-
 static void query_iterator_print(QueryIterator query_it)
 {
   TupleIterator *it = query_iterator_get_output_iterator(&query_it);
@@ -116,6 +66,49 @@ static void run_query(
       == DATABASE_QUERY_OK);
   query_iterator_print(it);
   query_iterator_destroy(&it);
+}
+
+static void dump_relations_table(Database *db)
+{
+  run_query(
+      db,
+      1,
+      (QueryOperator[]){QUERY_OPERATOR_READ},
+      (QueryParameter[]){
+          {.read_relation_name =
+               string_slice_from_ptr(relations_relation_name)}});
+}
+
+static void dump_relation_columns_table(Database *db)
+{
+  run_query(
+      db,
+      1,
+      (QueryOperator[]){QUERY_OPERATOR_READ},
+      (QueryParameter[]){
+          {.read_relation_name =
+               string_slice_from_ptr(relation_columns_relation_name)}});
+}
+
+static void dump_users_table(Database *db)
+{
+  run_query(
+      db,
+      1,
+      (QueryOperator[]){QUERY_OPERATOR_READ},
+      (QueryParameter[]){
+          {.read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)}});
+}
+
+static void dump_shopping_cart_table(Database *db)
+{
+  run_query(
+      db,
+      1,
+      (QueryOperator[]){QUERY_OPERATOR_READ},
+      (QueryParameter[]){
+          {.read_relation_name =
+               string_slice_from_ptr(SHOPPING_CART_TABLE_NAME)}});
 }
 
 const ColumnType users_relation_types[] = {
@@ -321,160 +314,6 @@ static void insert_shopping_cart_items(Database *db)
       == DATABASE_INSERT_TUPLE_OK);
 }
 
-static void dump_relations_table(Database *db)
-{
-  Relation relation = {};
-  assert(
-      database_read_relation(
-          db, &relation, string_slice_from_ptr(relations_relation_name))
-      == DATABASE_READ_RELATION_OK);
-  relation_print(relation);
-  relation_destroy(&relation);
-}
-
-static void dump_relation_columns_table(Database *db)
-{
-  Relation relation = {};
-  assert(
-      database_read_relation(
-          db, &relation, string_slice_from_ptr(relation_columns_relation_name))
-      == DATABASE_READ_RELATION_OK);
-  relation_print(relation);
-  relation_destroy(&relation);
-}
-
-static void dump_users_table(Database *db)
-{
-  Relation relation = {};
-  assert(
-      database_read_relation(
-          db, &relation, string_slice_from_ptr(USERS_TABLE_NAME))
-      == DATABASE_READ_RELATION_OK);
-  relation_print(relation);
-  relation_destroy(&relation);
-}
-
-static void dump_shopping_cart_table(Database *db)
-{
-  Relation relation = {};
-  assert(
-      database_read_relation(
-          db, &relation, string_slice_from_ptr(SHOPPING_CART_TABLE_NAME))
-      == DATABASE_READ_RELATION_OK);
-  relation_print(relation);
-  relation_destroy(&relation);
-}
-
-static void project_email(Database *db)
-{
-  const StringSlice names_slice[] = {
-      string_slice_from_ptr(users_relation_names[1]),
-  };
-
-  Relation relation = {};
-  assert(
-      database_read_relation(
-          db, &relation, string_slice_from_ptr(USERS_TABLE_NAME))
-      == DATABASE_READ_RELATION_OK);
-  assert(
-      relation_project(&relation, names_slice, ARRAY_LENGTH(names_slice))
-      == RELATION_PROJECT_OK);
-  relation_print(relation);
-  relation_destroy(&relation);
-}
-
-static void project_id(Database *db)
-{
-  const StringSlice names_slice[] = {
-      string_slice_from_ptr(users_relation_names[0]),
-  };
-
-  Relation relation = {};
-  assert(
-      database_read_relation(
-          db, &relation, string_slice_from_ptr(USERS_TABLE_NAME))
-      == DATABASE_READ_RELATION_OK);
-  assert(
-      relation_project(&relation, names_slice, ARRAY_LENGTH(names_slice))
-      == RELATION_PROJECT_OK);
-  relation_print(relation);
-  relation_destroy(&relation);
-}
-
-static void select_id(Database *db)
-{
-  Relation relation = {};
-  assert(
-      database_read_relation(
-          db, &relation, string_slice_from_ptr(USERS_TABLE_NAME))
-      == DATABASE_READ_RELATION_OK);
-  assert(
-      relation_select(
-          &relation,
-          (Predicate){
-              .operator = PREDICATE_OPERATOR_EQUAL_CONSTANT,
-              .constant =
-                  {
-                      .column_name =
-                          string_slice_from_ptr(users_relation_names[0]),
-                      .value.integer = 0,
-                  },
-          })
-      == RELATION_SELECT_OK);
-  relation_print(relation);
-  relation_destroy(&relation);
-}
-
-static void select_email(Database *db)
-{
-  Relation relation = {};
-  assert(
-      database_read_relation(
-          db, &relation, string_slice_from_ptr(USERS_TABLE_NAME))
-      == DATABASE_READ_RELATION_OK);
-  assert(
-      relation_select(
-          &relation,
-          (Predicate){
-              .operator = PREDICATE_OPERATOR_STRING_PREFIX_EQUAL,
-              .constant =
-                  {
-                      .column_name =
-                          string_slice_from_ptr(users_relation_names[1]),
-                      .value.string = string_slice_from_ptr("user"),
-                  },
-          })
-      == RELATION_SELECT_OK);
-  relation_print(relation);
-  relation_destroy(&relation);
-}
-
-static void cartesian_product(Database *db)
-{
-  Relation users = {};
-  assert(
-      database_read_relation(
-          db, &users, string_slice_from_ptr(USERS_TABLE_NAME))
-      == DATABASE_READ_RELATION_OK);
-
-  Relation cart = {};
-  assert(
-      database_read_relation(
-          db, &cart, string_slice_from_ptr(SHOPPING_CART_TABLE_NAME))
-      == DATABASE_READ_RELATION_OK);
-
-  Relation product = {};
-  assert(
-      relation_cartesian_product(users, cart, &product)
-      == RELATION_CARTESIAN_PRODUCT_OK);
-
-  relation_print(product);
-
-  relation_destroy(&users);
-  relation_destroy(&cart);
-  relation_destroy(&product);
-}
-
 static void query_read(Database *db)
 {
   QueryOperator operators[] = {
@@ -557,15 +396,12 @@ static void query_select_email(Database *db)
       {.select =
            {
                .query_index = 0,
-               .predicate =
+               .operator = PREDICATE_OPERATOR_STRING_PREFIX_EQUAL,
+               .constant =
                    {
-                       .operator = PREDICATE_OPERATOR_STRING_PREFIX_EQUAL,
-                       .constant =
-                           {
-                               .column_name = string_slice_from_ptr(
-                                   users_relation_names[1]),
-                               .value.string = string_slice_from_ptr("user"),
-                           },
+                       .column_name =
+                           string_slice_from_ptr(users_relation_names[1]),
+                       .value.string = string_slice_from_ptr("user"),
                    },
            }},
   };
@@ -615,16 +451,12 @@ static void multi_stage_query(Database *db)
       {.select =
            {
                .query_index = 2,
-               .predicate =
+               .operator = PREDICATE_OPERATOR_EQUAL_COLUMNS,
+               .two_columns =
                    {
-                       .operator = PREDICATE_OPERATOR_EQUAL_COLUMNS,
-                       .two_columns =
-                           {
-                               .lhs_column_name =
-                                   string_slice_from_ptr("users.id"),
-                               .rhs_column_name = string_slice_from_ptr(
-                                   "shopping_cart.user_id"),
-                           },
+                       .lhs_column_name = string_slice_from_ptr("users.id"),
+                       .rhs_column_name =
+                           string_slice_from_ptr("shopping_cart.user_id"),
                    },
            }},
       {.project =
@@ -681,21 +513,6 @@ int main(int argc, char *argv[])
 
   insert_shopping_cart_items(&db);
   dump_shopping_cart_table(&db);
-
-  printf("Project by email\n");
-
-  project_email(&db);
-  printf("Project by id\n");
-  project_id(&db);
-
-  printf("Select id is 0\n");
-  select_id(&db);
-
-  printf("Select email with prefix 'user'\n");
-  select_email(&db);
-
-  printf("Performing cartesian product on users and shopping cart\n");
-  cartesian_product(&db);
 
   printf("Running basic queries: read users table\n");
   query_read(&db);
