@@ -51,19 +51,13 @@ static void query_iterator_print(QueryIterator query_it)
   printf("\n\n");
 }
 
-static void run_query(
-    Database *db,
-    size_t length,
-    QueryOperator *operators,
-    QueryParameter *parameters)
+static void run_query(Database *db, size_t length, QueryParameter *parameters)
 {
   QueryIterator it = {
       .length = 0,
       .iterators = NULL,
   };
-  assert(
-      database_query(db, length, operators, parameters, &it)
-      == DATABASE_QUERY_OK);
+  assert(database_query(db, length, parameters, &it) == DATABASE_QUERY_OK);
   query_iterator_print(it);
   query_iterator_destroy(&it);
 }
@@ -73,9 +67,9 @@ static void dump_relations_table(Database *db)
   run_query(
       db,
       1,
-      (QueryOperator[]){QUERY_OPERATOR_READ},
       (QueryParameter[]){
-          {.read_relation_name =
+          {.operator = QUERY_OPERATOR_READ,
+           .read_relation_name =
                string_slice_from_ptr(relations_relation_name)}});
 }
 
@@ -84,9 +78,9 @@ static void dump_relation_columns_table(Database *db)
   run_query(
       db,
       1,
-      (QueryOperator[]){QUERY_OPERATOR_READ},
       (QueryParameter[]){
-          {.read_relation_name =
+          {.operator = QUERY_OPERATOR_READ,
+           .read_relation_name =
                string_slice_from_ptr(relation_columns_relation_name)}});
 }
 
@@ -95,9 +89,9 @@ static void dump_users_table(Database *db)
   run_query(
       db,
       1,
-      (QueryOperator[]){QUERY_OPERATOR_READ},
       (QueryParameter[]){
-          {.read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)}});
+          {.operator = QUERY_OPERATOR_READ,
+           .read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)}});
 }
 
 static void dump_shopping_cart_table(Database *db)
@@ -105,9 +99,9 @@ static void dump_shopping_cart_table(Database *db)
   run_query(
       db,
       1,
-      (QueryOperator[]){QUERY_OPERATOR_READ},
       (QueryParameter[]){
-          {.read_relation_name =
+          {.operator = QUERY_OPERATOR_READ,
+           .read_relation_name =
                string_slice_from_ptr(SHOPPING_CART_TABLE_NAME)}});
 }
 
@@ -316,17 +310,13 @@ static void insert_shopping_cart_items(Database *db)
 
 static void query_read(Database *db)
 {
-  QueryOperator operators[] = {
-      QUERY_OPERATOR_READ,
-  };
-
-  QueryParameter parameters[] = {
-      {.read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
-  };
-
-  STATIC_ASSERT(ARRAY_LENGTH(operators) == ARRAY_LENGTH(parameters));
-
-  run_query(db, ARRAY_LENGTH(operators), operators, parameters);
+  run_query(
+      db,
+      1,
+      (QueryParameter[]){
+          {.operator = QUERY_OPERATOR_READ,
+           .read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
+      });
 }
 
 static void query_project_by_id(Database *db)
@@ -335,14 +325,11 @@ static void query_project_by_id(Database *db)
       string_slice_from_ptr(users_relation_names[0]),
   };
 
-  QueryOperator operators[] = {
-      QUERY_OPERATOR_READ,
-      QUERY_OPERATOR_PROJECT,
-  };
-
   QueryParameter parameters[] = {
-      {.read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
-      {.project =
+      {.operator = QUERY_OPERATOR_READ,
+       .read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
+      {.operator = QUERY_OPERATOR_PROJECT,
+       .project =
            {
                .query_index = 0,
                .column_names = project_columns,
@@ -350,9 +337,7 @@ static void query_project_by_id(Database *db)
            }},
   };
 
-  STATIC_ASSERT(ARRAY_LENGTH(operators) == ARRAY_LENGTH(parameters));
-
-  run_query(db, ARRAY_LENGTH(operators), operators, parameters);
+  run_query(db, ARRAY_LENGTH(parameters), parameters);
 }
 
 static void query_project_by_email(Database *db)
@@ -361,14 +346,11 @@ static void query_project_by_email(Database *db)
       string_slice_from_ptr(users_relation_names[1]),
   };
 
-  QueryOperator operators[] = {
-      QUERY_OPERATOR_READ,
-      QUERY_OPERATOR_PROJECT,
-  };
-
   QueryParameter parameters[] = {
-      {.read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
-      {.project =
+      {.operator = QUERY_OPERATOR_READ,
+       .read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
+      {.operator = QUERY_OPERATOR_PROJECT,
+       .project =
            {
                .query_index = 0,
                .column_names = project_columns,
@@ -376,8 +358,7 @@ static void query_project_by_email(Database *db)
            }},
   };
 
-  STATIC_ASSERT(ARRAY_LENGTH(operators) == ARRAY_LENGTH(parameters));
-  run_query(db, ARRAY_LENGTH(operators), operators, parameters);
+  run_query(db, ARRAY_LENGTH(parameters), parameters);
 }
 
 static void query_select_email(Database *db)
@@ -386,14 +367,11 @@ static void query_select_email(Database *db)
       string_slice_from_ptr(users_relation_names[1]),
   };
 
-  QueryOperator operators[] = {
-      QUERY_OPERATOR_READ,
-      QUERY_OPERATOR_SELECT,
-  };
-
   QueryParameter parameters[] = {
-      {.read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
-      {.select =
+      {.operator = QUERY_OPERATOR_READ,
+       .read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
+      {.operator = QUERY_OPERATOR_SELECT,
+       .select =
            {
                .query_index = 0,
                .operator = PREDICATE_OPERATOR_STRING_PREFIX_EQUAL,
@@ -406,26 +384,21 @@ static void query_select_email(Database *db)
            }},
   };
 
-  STATIC_ASSERT(ARRAY_LENGTH(operators) == ARRAY_LENGTH(parameters));
-  run_query(db, ARRAY_LENGTH(operators), operators, parameters);
+  run_query(db, ARRAY_LENGTH(parameters), parameters);
 }
 
 static void query_cartesian_product(Database *db)
 {
-  QueryOperator operators[] = {
-      QUERY_OPERATOR_READ,
-      QUERY_OPERATOR_READ,
-      QUERY_OPERATOR_CARTESIAN_PRODUCT,
-  };
-
   QueryParameter parameters[] = {
-      {.read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
-      {.read_relation_name = string_slice_from_ptr(SHOPPING_CART_TABLE_NAME)},
-      {.cartesian_product = {.lhs_index = 0, .rhs_index = 1}},
+      {.operator = QUERY_OPERATOR_READ,
+       .read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
+      {.operator = QUERY_OPERATOR_READ,
+       .read_relation_name = string_slice_from_ptr(SHOPPING_CART_TABLE_NAME)},
+      {.operator = QUERY_OPERATOR_CARTESIAN_PRODUCT,
+       .cartesian_product = {.lhs_index = 0, .rhs_index = 1}},
   };
 
-  STATIC_ASSERT(ARRAY_LENGTH(operators) == ARRAY_LENGTH(parameters));
-  run_query(db, ARRAY_LENGTH(operators), operators, parameters);
+  run_query(db, ARRAY_LENGTH(parameters), parameters);
 }
 
 static void multi_stage_query(Database *db)
@@ -436,19 +409,15 @@ static void multi_stage_query(Database *db)
       string_slice_from_ptr(shopping_cart_relation_names[1]),
   };
 
-  QueryOperator operators[] = {
-      QUERY_OPERATOR_READ,
-      QUERY_OPERATOR_READ,
-      QUERY_OPERATOR_CARTESIAN_PRODUCT,
-      QUERY_OPERATOR_SELECT,
-      QUERY_OPERATOR_PROJECT,
-  };
-
   QueryParameter parameters[] = {
-      {.read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
-      {.read_relation_name = string_slice_from_ptr(SHOPPING_CART_TABLE_NAME)},
-      {.cartesian_product = {.lhs_index = 0, .rhs_index = 1}},
-      {.select =
+      {.operator = QUERY_OPERATOR_READ,
+       .read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)},
+      {.operator = QUERY_OPERATOR_READ,
+       .read_relation_name = string_slice_from_ptr(SHOPPING_CART_TABLE_NAME)},
+      {.operator = QUERY_OPERATOR_CARTESIAN_PRODUCT,
+       .cartesian_product = {.lhs_index = 0, .rhs_index = 1}},
+      {.operator = QUERY_OPERATOR_SELECT,
+       .select =
            {
                .query_index = 2,
                .operator = PREDICATE_OPERATOR_EQUAL_COLUMNS,
@@ -459,7 +428,8 @@ static void multi_stage_query(Database *db)
                            string_slice_from_ptr("shopping_cart.user_id"),
                    },
            }},
-      {.project =
+      {.operator = QUERY_OPERATOR_PROJECT,
+       .project =
            {
                .query_index = 3,
                .column_names = project_columns,
@@ -467,9 +437,7 @@ static void multi_stage_query(Database *db)
            }},
   };
 
-  STATIC_ASSERT(ARRAY_LENGTH(operators) == ARRAY_LENGTH(parameters));
-
-  run_query(db, ARRAY_LENGTH(operators), operators, parameters);
+  run_query(db, ARRAY_LENGTH(parameters), parameters);
 }
 
 static void delete_tuples(Database *db)

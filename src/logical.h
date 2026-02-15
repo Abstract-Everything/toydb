@@ -787,12 +787,16 @@ typedef struct
   size_t rhs_index;
 } CartesianProductQueryParameter;
 
-typedef union
+typedef struct
 {
-  StringSlice read_relation_name;
-  ProjectQueryParameter project;
-  SelectQueryParameter select;
-  CartesianProductQueryParameter cartesian_product;
+  QueryOperator operator;
+  union
+  {
+    StringSlice read_relation_name;
+    ProjectQueryParameter project;
+    SelectQueryParameter select;
+    CartesianProductQueryParameter cartesian_product;
+  };
 } QueryParameter;
 
 typedef enum
@@ -1262,14 +1266,12 @@ typedef enum
 static DatabaseQueryError database_query(
     Database *db,
     size_t length,
-    const QueryOperator *operators,
     const QueryParameter *parameters,
     QueryIterator *it)
 {
   // TODO: Make sure the dependendencies have no loops
   assert(db != NULL);
   assert(length > 0);
-  assert(operators != NULL);
   assert(parameters != NULL);
   assert(it != NULL);
 
@@ -1284,7 +1286,7 @@ static DatabaseQueryError database_query(
   size_t query = 0;
   for (; status == DATABASE_QUERY_OK && query < length; ++query)
   {
-    switch (operators[query])
+    switch (parameters[query].operator)
     {
     case QUERY_OPERATOR_READ:
     {
