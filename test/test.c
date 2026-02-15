@@ -1,5 +1,6 @@
 #include "linux.h"
 #include "logical.h"
+#include "parser.h"
 
 #include <stdio.h>
 
@@ -60,6 +61,32 @@ static void run_query(Database *db, size_t length, QueryParameter *parameters)
   assert(database_query(db, length, parameters, &it) == DATABASE_QUERY_OK);
   query_iterator_print(it);
   query_iterator_destroy(&it);
+}
+
+static void run_sql_query(Database *db, StringSlice query)
+{
+  StringSlice *select_names = NULL;
+  size_t select_length = 0;
+  StringSlice *from_names = NULL;
+  size_t from_length = 0;
+  size_t parameters_length = 0;
+  QueryParameter *parameters = NULL;
+  assert(
+      sql_parse_query(
+          query,
+          &select_names,
+          &select_length,
+          &from_names,
+          &from_length,
+          &parameters,
+          &parameters_length)
+      == SQL_PARSE_ERROR_OK);
+
+  run_query(db, parameters_length, parameters);
+
+  deallocate(select_names, sizeof(*select_names) * select_length);
+  deallocate(from_names, sizeof(*from_names) * from_length);
+  deallocate(parameters, sizeof(*parameters) * parameters_length);
 }
 
 static void dump_relations_table(Database *db)
@@ -457,6 +484,42 @@ static void delete_tuples(Database *db)
       == DATABASE_DELETE_TUPLES_OK);
 }
 
+void select_star_sql(Database *db)
+{
+  run_sql_query(
+      db,
+      string_slice_from_ptr(
+          "SELECT *\n"
+          "FROM users;"));
+}
+
+void select_id_sql(Database *db)
+{
+  run_sql_query(
+      db,
+      string_slice_from_ptr(
+          "SELECT id\n"
+          "FROM users;"));
+}
+
+void select_id_email_sql(Database *db)
+{
+  run_sql_query(
+      db,
+      string_slice_from_ptr(
+          "SELECT id, email\n"
+          "FROM users;"));
+}
+
+void select_cartesian_product(Database *db)
+{
+  run_sql_query(
+      db,
+      string_slice_from_ptr(
+          "SELECT *\n"
+          "FROM users, shopping_cart;"));
+}
+
 int main(int argc, char *argv[])
 {
   UNUSED(argc);
@@ -503,6 +566,18 @@ int main(int argc, char *argv[])
   printf("Deleting user with id 0\n");
   delete_tuples(&db);
   dump_users_table(&db);
+
+  printf("SQL parser: select star\n");
+  select_star_sql(&db);
+
+  printf("SQL parser: select id\n");
+  select_id_sql(&db);
+
+  printf("SQL parser: select id and email\n");
+  select_id_email_sql(&db);
+
+  printf("SQL parser: cartesian product\n");
+  select_cartesian_product(&db);
 
   printf("Dropping users table\n");
   drop_table(&db);
