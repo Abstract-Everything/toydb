@@ -8,9 +8,14 @@ typedef enum
   TOKEN_ASTERISK,
   TOKEN_COMMA,
   TOKEN_SEMICOLON,
+  TOKEN_EQUAL,
   TOKEN_IDENTIFIER,
+  TOKEN_STRING,
+  TOKEN_NUMBER,
   TOKEN_KEYWORD_SELECT,
   TOKEN_KEYWORD_FROM,
+  TOKEN_KEYWORD_WHERE,
+  TOKEN_KEYWORD_LIKE,
 } Token;
 
 typedef struct
@@ -19,6 +24,7 @@ typedef struct
   union
   {
     StringSlice string;
+    StoreInteger integer;
   };
 } TokenData;
 
@@ -29,7 +35,13 @@ bool32 is_whitespace(char c)
 
 bool32 is_alpha(char c)
 {
-  return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || c == '_';
+  return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || c == '_'
+         || c == '.';
+}
+
+bool32 is_number(char c)
+{
+  return '0' <= c && c <= '9';
 }
 
 TokenData token_next_(const char **const start, const char *const end)
@@ -63,6 +75,61 @@ TokenData token_next_(const char **const start, const char *const end)
     return (TokenData){.token = TOKEN_SEMICOLON};
   }
 
+  if (**start == '=')
+  {
+    *start += 1;
+    return (TokenData){.token = TOKEN_EQUAL};
+  }
+
+  if (is_number(**start))
+  {
+    int64_t integer = 0;
+    for (; *start != end && is_number(**start); *start += 1)
+    {
+      int64_t value = **start - '0';
+
+      const int64_t MAX_INT_64 = 0x7fffffffffffffff;
+      const int64_t BASE = 10;
+      if (integer > (MAX_INT_64 / BASE)
+          || value > MAX_INT_64 - (BASE * integer))
+      {
+        return (TokenData){.token = TOKEN_INVALID};
+      }
+
+      integer = (BASE * integer) + value;
+    }
+    return (TokenData){
+        .token = TOKEN_NUMBER,
+        .integer = integer,
+    };
+  }
+
+  if (**start == '\'')
+  {
+    *start += 1;
+    const char *string_start = *start;
+    for (bool32 escape = false; *start != end && (**start != '\'' || escape);
+         *start += 1)
+    {
+      escape = !escape && **start == '\\';
+    }
+
+    if (**start != '\'')
+    {
+      return (TokenData){.token = TOKEN_INVALID};
+    }
+    *start += 1;
+
+    return (TokenData){
+        .token = TOKEN_STRING,
+        .string =
+            (StringSlice){
+                .data = string_start,
+                .length = *start - string_start,
+            },
+    };
+  }
+
   if (!is_alpha(**start))
   {
     return (TokenData){.token = TOKEN_INVALID};
@@ -85,6 +152,20 @@ TokenData token_next_(const char **const start, const char *const end)
   {
     *start += FROM.length;
     return (TokenData){.token = TOKEN_KEYWORD_FROM};
+  }
+
+  StringSlice WHERE = string_slice_from_ptr("WHERE");
+  if (string_slice_prefix_eq(remaining, WHERE))
+  {
+    *start += WHERE.length;
+    return (TokenData){.token = TOKEN_KEYWORD_WHERE};
+  }
+
+  StringSlice LIKE = string_slice_from_ptr("LIKE");
+  if (string_slice_prefix_eq(remaining, LIKE))
+  {
+    *start += LIKE.length;
+    return (TokenData){.token = TOKEN_KEYWORD_LIKE};
   }
 
   const char *identifier_start = *start;
@@ -139,9 +220,14 @@ SqlParseError sql_parse_select(
     return SQL_PARSE_ERROR_UNEXPECTED_END_OF_STRING;
 
   case TOKEN_KEYWORD_FROM:
-  case TOKEN_ASTERISK:
+  case TOKEN_KEYWORD_LIKE:
+  case TOKEN_KEYWORD_WHERE:
   case TOKEN_IDENTIFIER:
+  case TOKEN_STRING:
+  case TOKEN_NUMBER:
+  case TOKEN_ASTERISK:
   case TOKEN_COMMA:
+  case TOKEN_EQUAL:
   case TOKEN_SEMICOLON:
   case TOKEN_INVALID:
     return SQL_PARSE_ERROR_UNEXPECTED_TOKEN;
@@ -165,7 +251,12 @@ SqlParseError sql_parse_select(
 
     case TOKEN_KEYWORD_SELECT:
     case TOKEN_KEYWORD_FROM:
+    case TOKEN_KEYWORD_WHERE:
+    case TOKEN_KEYWORD_LIKE:
+    case TOKEN_STRING:
+    case TOKEN_NUMBER:
     case TOKEN_COMMA:
+    case TOKEN_EQUAL:
     case TOKEN_SEMICOLON:
     case TOKEN_INVALID:
       return SQL_PARSE_ERROR_UNEXPECTED_TOKEN;
@@ -212,8 +303,13 @@ SqlParseError sql_parse_from(
     return SQL_PARSE_ERROR_UNEXPECTED_END_OF_STRING;
 
   case TOKEN_KEYWORD_SELECT:
-  case TOKEN_ASTERISK:
+  case TOKEN_KEYWORD_WHERE:
+  case TOKEN_KEYWORD_LIKE:
   case TOKEN_IDENTIFIER:
+  case TOKEN_STRING:
+  case TOKEN_NUMBER:
+  case TOKEN_EQUAL:
+  case TOKEN_ASTERISK:
   case TOKEN_COMMA:
   case TOKEN_SEMICOLON:
   case TOKEN_INVALID:
@@ -232,6 +328,11 @@ SqlParseError sql_parse_from(
 
     case TOKEN_KEYWORD_SELECT:
     case TOKEN_KEYWORD_FROM:
+    case TOKEN_KEYWORD_WHERE:
+    case TOKEN_KEYWORD_LIKE:
+    case TOKEN_STRING:
+    case TOKEN_NUMBER:
+    case TOKEN_EQUAL:
     case TOKEN_COMMA:
     case TOKEN_ASTERISK:
     case TOKEN_SEMICOLON:
@@ -259,6 +360,135 @@ SqlParseError sql_parse_from(
       token_next(remaining);
       break;
     }
+  }
+
+  return SQL_PARSE_ERROR_OK;
+}
+
+SqlParseError sql_parse_predicate(
+    StringSlice *remaining, SelectQueryParameterVariable *predicate)
+{
+  assert(remaining != NULL);
+  assert(predicate != NULL);
+
+  TokenData data = token_next(remaining);
+  switch (data.token)
+  {
+  case TOKEN_END_OF_FILE:
+    return SQL_PARSE_ERROR_UNEXPECTED_END_OF_STRING;
+
+  case TOKEN_KEYWORD_SELECT:
+  case TOKEN_KEYWORD_FROM:
+  case TOKEN_KEYWORD_WHERE:
+  case TOKEN_KEYWORD_LIKE:
+  case TOKEN_EQUAL:
+  case TOKEN_COMMA:
+  case TOKEN_ASTERISK:
+  case TOKEN_SEMICOLON:
+  case TOKEN_INVALID:
+    return SQL_PARSE_ERROR_UNEXPECTED_TOKEN;
+
+  case TOKEN_STRING:
+    *predicate = (SelectQueryParameterVariable){
+        .type = PREDICATE_VARIABLE_TYPE_CONSTANT,
+        .constant =
+            {
+                .type = COLUMN_TYPE_STRING,
+                .value.string = data.string,
+            },
+    };
+    break;
+
+  case TOKEN_NUMBER:
+    *predicate = (SelectQueryParameterVariable){
+        .type = PREDICATE_VARIABLE_TYPE_CONSTANT,
+        .constant =
+            {
+                .type = COLUMN_TYPE_INTEGER,
+                .value.string = data.integer,
+            },
+    };
+    break;
+
+  case TOKEN_IDENTIFIER:
+    *predicate = (SelectQueryParameterVariable){
+        .type = PREDICATE_VARIABLE_TYPE_COLUMN,
+        .column_name = data.string,
+    };
+    break;
+  }
+
+  return SQL_PARSE_ERROR_OK;
+}
+
+SqlParseError sql_parse_where(
+    StringSlice *remaining,
+    PredicateOperator *operator,
+    SelectQueryParameterVariable * lhs,
+    SelectQueryParameterVariable *rhs)
+{
+  assert(remaining != NULL);
+  assert(lhs != NULL);
+  assert(rhs != NULL);
+
+  switch (token_next(remaining).token)
+  {
+  case TOKEN_END_OF_FILE:
+    return SQL_PARSE_ERROR_UNEXPECTED_END_OF_STRING;
+
+  case TOKEN_KEYWORD_SELECT:
+  case TOKEN_KEYWORD_FROM:
+  case TOKEN_KEYWORD_LIKE:
+  case TOKEN_IDENTIFIER:
+  case TOKEN_STRING:
+  case TOKEN_NUMBER:
+  case TOKEN_EQUAL:
+  case TOKEN_ASTERISK:
+  case TOKEN_COMMA:
+  case TOKEN_SEMICOLON:
+  case TOKEN_INVALID:
+    return SQL_PARSE_ERROR_UNEXPECTED_TOKEN;
+
+  case TOKEN_KEYWORD_WHERE:
+    break;
+  }
+
+  SqlParseError error = sql_parse_predicate(remaining, lhs);
+  if (error != SQL_PARSE_ERROR_OK)
+  {
+    return error;
+  }
+
+  switch (token_next(remaining).token)
+  {
+  case TOKEN_END_OF_FILE:
+    return SQL_PARSE_ERROR_UNEXPECTED_END_OF_STRING;
+
+  case TOKEN_KEYWORD_SELECT:
+  case TOKEN_KEYWORD_FROM:
+  case TOKEN_KEYWORD_WHERE:
+  case TOKEN_ASTERISK:
+  case TOKEN_IDENTIFIER:
+  case TOKEN_STRING:
+  case TOKEN_NUMBER:
+  case TOKEN_COMMA:
+  case TOKEN_SEMICOLON:
+  case TOKEN_INVALID:
+    return SQL_PARSE_ERROR_UNEXPECTED_TOKEN;
+
+  case TOKEN_EQUAL:
+    *operator= PREDICATE_OPERATOR_EQUAL;
+    break;
+
+  case TOKEN_KEYWORD_LIKE:
+    *operator= PREDICATE_OPERATOR_STRING_LIKE;
+    break;
+  }
+
+  error = sql_parse_predicate(remaining, rhs);
+  if (error != SQL_PARSE_ERROR_OK)
+  {
+    return error;
   }
 
   return SQL_PARSE_ERROR_OK;
@@ -296,6 +526,18 @@ SqlParseError sql_parse_query(
   if (status != SQL_PARSE_ERROR_OK)
   {
     return status;
+  }
+
+  PredicateOperator operator= PREDICATE_OPERATOR_TRUE;
+  SelectQueryParameterVariable lhs = {};
+  SelectQueryParameterVariable rhs = {};
+  if (token_peek(remaining).token == TOKEN_KEYWORD_WHERE)
+  {
+    status = sql_parse_where(&remaining, &operator, & lhs, &rhs);
+    if (status != SQL_PARSE_ERROR_OK)
+    {
+      return status;
+    }
   }
 
   if (token_next(&remaining).token != TOKEN_SEMICOLON)
@@ -340,6 +582,27 @@ SqlParseError sql_parse_query(
       };
     }
   }
+
+  if (reallocate_update_length(
+          sizeof(**parameters),
+          (void **)parameters,
+          parameters_length,
+          *parameters_length + 1)
+      != ALLOCATE_OK)
+  {
+    return SQL_PARSE_ERROR_OUT_OF_MEMORY;
+  }
+
+  (*parameters)[*parameters_length - 1] = (QueryParameter){
+      .operator= QUERY_OPERATOR_SELECT,
+      .select =
+          {
+              .query_index = *parameters_length - 2,
+              .operator= operator,
+              .lhs = lhs,
+              .rhs = rhs,
+          },
+  };
 
   if (*select_names != NULL)
   {

@@ -65,6 +65,8 @@ static void run_query(Database *db, size_t length, QueryParameter *parameters)
 
 static void run_sql_query(Database *db, StringSlice query)
 {
+  printf("Running SQL:\n%.*s\n\n", (int)query.length, query.data);
+
   StringSlice *select_names = NULL;
   size_t select_length = 0;
   StringSlice *from_names = NULL;
@@ -411,7 +413,11 @@ static void query_select_email(Database *db)
                .rhs =
                    {
                        .type = PREDICATE_VARIABLE_TYPE_CONSTANT,
-                       .value.string = string_slice_from_ptr("user%"),
+                       .constant =
+                           {
+                               .type = COLUMN_TYPE_STRING,
+                               .value.string = string_slice_from_ptr("user%"),
+                           },
                    },
            }},
   };
@@ -452,7 +458,7 @@ static void multi_stage_query(Database *db)
        .select =
            {
                .query_index = 2,
-               .operator = PREDICATE_OPERATOR_INTEGER_EQUAL,
+               .operator = PREDICATE_OPERATOR_EQUAL,
                .lhs =
                    {
                        .type = PREDICATE_VARIABLE_TYPE_COLUMN,
@@ -461,7 +467,7 @@ static void multi_stage_query(Database *db)
                .rhs =
                    {
                        .type = PREDICATE_VARIABLE_TYPE_COLUMN,
-                       .value.string =
+                       .column_name =
                            string_slice_from_ptr("shopping_cart.user_id"),
                    },
            }},
@@ -494,7 +500,7 @@ static void delete_tuples(Database *db)
       == DATABASE_DELETE_TUPLES_OK);
 }
 
-void select_star_sql(Database *db)
+void sql_select_star(Database *db)
 {
   run_sql_query(
       db,
@@ -503,7 +509,7 @@ void select_star_sql(Database *db)
           "FROM users;"));
 }
 
-void select_id_sql(Database *db)
+void sql_select_users_id(Database *db)
 {
   run_sql_query(
       db,
@@ -512,7 +518,7 @@ void select_id_sql(Database *db)
           "FROM users;"));
 }
 
-void select_id_email_sql(Database *db)
+void sql_select_users_id_email(Database *db)
 {
   run_sql_query(
       db,
@@ -521,7 +527,7 @@ void select_id_email_sql(Database *db)
           "FROM users;"));
 }
 
-void select_cartesian_product(Database *db)
+void sql_select_from_users_and_shopping_cart(Database *db)
 {
   run_sql_query(
       db,
@@ -530,6 +536,25 @@ void select_cartesian_product(Database *db)
           "FROM users, shopping_cart;"));
 }
 
+void sql_where_email_prefix_user(Database *db)
+{
+  run_sql_query(
+      db,
+      string_slice_from_ptr(
+          "SELECT *\n"
+          "FROM users, shopping_cart\n"
+          "WHERE email LIKE 'user%';"));
+}
+
+void sql_manual_join(Database *db)
+{
+  run_sql_query(
+      db,
+      string_slice_from_ptr(
+          "SELECT *\n"
+          "FROM users, shopping_cart\n"
+          "WHERE users.id = shopping_cart.user_id;"));
+}
 int main(int argc, char *argv[])
 {
   UNUSED(argc);
@@ -573,17 +598,12 @@ int main(int argc, char *argv[])
   printf("Running basic queries: multi stage\n");
   multi_stage_query(&db);
 
-  printf("SQL parser: select star\n");
-  select_star_sql(&db);
-
-  printf("SQL parser: select id\n");
-  select_id_sql(&db);
-
-  printf("SQL parser: select id and email\n");
-  select_id_email_sql(&db);
-
-  printf("SQL parser: cartesian product\n");
-  select_cartesian_product(&db);
+  sql_select_star(&db);
+  sql_select_users_id(&db);
+  sql_select_users_id_email(&db);
+  sql_select_from_users_and_shopping_cart(&db);
+  sql_where_email_prefix_user(&db);
+  sql_manual_join(&db);
 
   printf("Deleting user with id 0\n");
   delete_tuples(&db);

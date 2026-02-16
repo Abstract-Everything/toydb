@@ -732,10 +732,18 @@ typedef enum
 
 typedef enum
 {
-  PREDICATE_OPERATOR_INTEGER_EQUAL,
-  PREDICATE_OPERATOR_STRING_EQUAL,
+  PREDICATE_OPERATOR_TRUE,
+  PREDICATE_OPERATOR_EQUAL,
   PREDICATE_OPERATOR_STRING_LIKE,
 } PredicateOperator;
+
+typedef enum
+{
+  PREDICATE_OPERATOR_GRANULAR_TRUE,
+  PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL,
+  PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL,
+  PREDICATE_OPERATOR_GRANULAR_STRING_LIKE,
+} PredicateOperatorGranular;
 
 typedef enum
 {
@@ -816,7 +824,11 @@ typedef struct
   union
   {
     StringSlice column_name;
-    ColumnValue value;
+    struct
+    {
+      ColumnType type;
+      ColumnValue value;
+    } constant;
   };
 } SelectQueryParameterVariable;
 
@@ -824,7 +836,6 @@ typedef struct
 {
   size_t query_index;
   PredicateOperator operator;
-
   SelectQueryParameterVariable lhs;
   SelectQueryParameterVariable rhs;
 } SelectQueryParameter;
@@ -887,7 +898,7 @@ typedef struct TupleIterator
     struct
     {
       struct TupleIterator *it;
-      PredicateOperator operator;
+      PredicateOperatorGranular operator;
       TupleIteratorPredicateVariable lhs;
       TupleIteratorPredicateVariable rhs;
     } select;
@@ -967,7 +978,7 @@ static TupleIterator project_tuple_iterator(
 
 static TupleIterator select_tuple_iterator(
     TupleIterator *it,
-    PredicateOperator operator,
+    PredicateOperatorGranular operator,
     TupleIteratorPredicateVariable lhs,
     TupleIteratorPredicateVariable rhs)
 {
@@ -1166,13 +1177,16 @@ bool32 tuple_iterator_select_tuple(TupleIterator *it)
 
   switch (it->select.operator)
   {
-  case PREDICATE_OPERATOR_INTEGER_EQUAL:
+  case PREDICATE_OPERATOR_GRANULAR_TRUE:
+    return true;
+
+  case PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL:
     return lhs.integer == rhs.integer;
 
-  case PREDICATE_OPERATOR_STRING_EQUAL:
+  case PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL:
     return string_slice_eq(lhs.string, rhs.string);
 
-  case PREDICATE_OPERATOR_STRING_LIKE:
+  case PREDICATE_OPERATOR_GRANULAR_STRING_LIKE:
     return string_like_operator(lhs.string, rhs.string);
   }
 }
@@ -1296,6 +1310,122 @@ typedef enum
   DATABASE_QUERY_OPERATOR_TYPE_MISMATCH,
 } DatabaseQueryError;
 
+static DatabaseQueryError database_query_select_fill_predicate_variable(
+    TupleIterator *it,
+    SelectQueryParameterVariable in,
+    TupleIteratorPredicateVariable *out,
+    ColumnType *column_type)
+{
+  switch (in.type)
+  {
+  case PREDICATE_VARIABLE_TYPE_CONSTANT:
+    *out = (TupleIteratorPredicateVariable){
+        .type = in.type,
+        .constant = in.constant.value,
+    };
+    *column_type = in.constant.type;
+    break;
+
+  case PREDICATE_VARIABLE_TYPE_COLUMN:
+  {
+    ColumnsLength column_index = 0;
+    if (!tuple_iterator_find_column_name(it, in.column_name, &column_index))
+    {
+      return DATABASE_QUERY_COLUMN_NOT_FOUND;
+    }
+
+    *out = (TupleIteratorPredicateVariable){
+        .type = in.type,
+        .column_index = column_index,
+    };
+    *column_type = tuple_iterator_column_type(it, column_index);
+  }
+  break;
+  }
+
+  return DATABASE_QUERY_OK;
+}
+
+DatabaseQueryError database_query_select(
+    SelectQueryParameter select, TupleIterator *it, TupleIterator *query)
+{
+  if (select.operator== PREDICATE_OPERATOR_TRUE)
+  {
+    *query = select_tuple_iterator(
+        it,
+        PREDICATE_OPERATOR_GRANULAR_TRUE,
+        (TupleIteratorPredicateVariable){},
+        (TupleIteratorPredicateVariable){});
+    return DATABASE_QUERY_OK;
+  }
+
+  TupleIteratorPredicateVariable lhs = {};
+  ColumnType lhs_column_type = {};
+  {
+    DatabaseQueryError error = database_query_select_fill_predicate_variable(
+        it, select.lhs, &lhs, &lhs_column_type);
+    if (error != DATABASE_QUERY_OK)
+    {
+      return error;
+    }
+  }
+
+  TupleIteratorPredicateVariable rhs = {};
+  ColumnType rhs_column_type = {};
+  {
+    DatabaseQueryError error = database_query_select_fill_predicate_variable(
+        it, select.rhs, &rhs, &rhs_column_type);
+    if (error != DATABASE_QUERY_OK)
+    {
+      return error;
+    }
+  }
+
+  PredicateOperatorGranular operator= {};
+  switch (select.operator)
+  {
+  case PREDICATE_OPERATOR_TRUE:
+    assert(false);
+    break;
+
+  case PREDICATE_OPERATOR_EQUAL:
+    if (lhs_column_type != rhs_column_type)
+    {
+      return DATABASE_QUERY_OPERATOR_TYPE_MISMATCH;
+    }
+
+    switch (lhs_column_type)
+    {
+    case COLUMN_TYPE_INTEGER:
+      operator= PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL;
+      break;
+
+    case COLUMN_TYPE_STRING:
+      operator= PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL;
+      break;
+    }
+    break;
+
+  case PREDICATE_OPERATOR_STRING_LIKE:
+    if (lhs_column_type != COLUMN_TYPE_STRING)
+    {
+      return DATABASE_QUERY_OPERATOR_TYPE_MISMATCH;
+    }
+
+    if (rhs_column_type != COLUMN_TYPE_STRING)
+    {
+      return DATABASE_QUERY_OPERATOR_TYPE_MISMATCH;
+    }
+
+    operator= PREDICATE_OPERATOR_GRANULAR_STRING_LIKE;
+    break;
+  }
+
+  *query = select_tuple_iterator(it, operator, lhs, rhs);
+
+  return DATABASE_QUERY_OK;
+}
+
 static DatabaseQueryError database_query(
     Database *db,
     size_t length,
@@ -1391,44 +1521,7 @@ static DatabaseQueryError database_query(
     {
       SelectQueryParameter select = parameters[query].select;
       TupleIterator *iter = &iterators[select.query_index];
-
-      TupleIteratorPredicateVariable lhs = {.type = select.lhs.type};
-      switch (select.lhs.type)
-      {
-      case PREDICATE_VARIABLE_TYPE_CONSTANT:
-        lhs.constant = select.lhs.value;
-        break;
-
-      case PREDICATE_VARIABLE_TYPE_COLUMN:
-        if (!tuple_iterator_find_column_name(
-                iter, select.lhs.column_name, &lhs.column_index))
-        {
-          status = DATABASE_QUERY_COLUMN_NOT_FOUND;
-        }
-        break;
-      }
-
-      TupleIteratorPredicateVariable rhs = {.type = select.rhs.type};
-      switch (select.rhs.type)
-      {
-      case PREDICATE_VARIABLE_TYPE_CONSTANT:
-        rhs.constant = select.rhs.value;
-        break;
-
-      case PREDICATE_VARIABLE_TYPE_COLUMN:
-        if (!tuple_iterator_find_column_name(
-                iter, select.rhs.column_name, &rhs.column_index))
-        {
-          status = DATABASE_QUERY_COLUMN_NOT_FOUND;
-        }
-        break;
-      }
-
-      if (status == DATABASE_QUERY_OK)
-      {
-        iterators[query] =
-            select_tuple_iterator(iter, select.operator, lhs, rhs);
-      }
+      status = database_query_select(select, iter, &iterators[query]);
     }
     break;
 
