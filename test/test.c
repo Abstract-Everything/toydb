@@ -402,10 +402,15 @@ static void query_select_email(Database *db)
            {
                .query_index = 0,
                .operator = PREDICATE_OPERATOR_STRING_LIKE,
-               .constant =
+               .lhs =
                    {
+                       .type = PREDICATE_VARIABLE_TYPE_COLUMN,
                        .column_name =
                            string_slice_from_ptr(users_relation_names[1]),
+                   },
+               .rhs =
+                   {
+                       .type = PREDICATE_VARIABLE_TYPE_CONSTANT,
                        .value.string = string_slice_from_ptr("user%"),
                    },
            }},
@@ -447,11 +452,16 @@ static void multi_stage_query(Database *db)
        .select =
            {
                .query_index = 2,
-               .operator = PREDICATE_OPERATOR_EQUAL_COLUMNS,
-               .two_columns =
+               .operator = PREDICATE_OPERATOR_INTEGER_EQUAL,
+               .lhs =
                    {
-                       .lhs_column_name = string_slice_from_ptr("users.id"),
-                       .rhs_column_name =
+                       .type = PREDICATE_VARIABLE_TYPE_COLUMN,
+                       .column_name = string_slice_from_ptr("users.id"),
+                   },
+               .rhs =
+                   {
+                       .type = PREDICATE_VARIABLE_TYPE_COLUMN,
+                       .value.string =
                            string_slice_from_ptr("shopping_cart.user_id"),
                    },
            }},
@@ -563,10 +573,6 @@ int main(int argc, char *argv[])
   printf("Running basic queries: multi stage\n");
   multi_stage_query(&db);
 
-  printf("Deleting user with id 0\n");
-  delete_tuples(&db);
-  dump_users_table(&db);
-
   printf("SQL parser: select star\n");
   select_star_sql(&db);
 
@@ -578,6 +584,10 @@ int main(int argc, char *argv[])
 
   printf("SQL parser: cartesian product\n");
   select_cartesian_product(&db);
+
+  printf("Deleting user with id 0\n");
+  delete_tuples(&db);
+  dump_users_table(&db);
 
   printf("Dropping users table\n");
   drop_table(&db);
