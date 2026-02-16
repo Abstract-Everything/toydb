@@ -401,12 +401,12 @@ static void query_select_email(Database *db)
        .select =
            {
                .query_index = 0,
-               .operator = PREDICATE_OPERATOR_STRING_PREFIX_EQUAL,
+               .operator = PREDICATE_OPERATOR_STRING_LIKE,
                .constant =
                    {
                        .column_name =
                            string_slice_from_ptr(users_relation_names[1]),
-                       .value.string = string_slice_from_ptr("user"),
+                       .value.string = string_slice_from_ptr("user%"),
                    },
            }},
   };

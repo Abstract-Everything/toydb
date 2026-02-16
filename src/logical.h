@@ -735,7 +735,7 @@ typedef enum
   PREDICATE_OPERATOR_GRANULAR_INVALID,
   PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL,
   PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL,
-  PREDICATE_OPERATOR_GRANULAR_STRING_PREFIX_EQUAL,
+  PREDICATE_OPERATOR_GRANULAR_STRING_LIKE,
   PREDICATE_OPERATOR_GRANULAR_TWO_COLUMNS_EQUAL,
 } PredicateOperatorGranular;
 
@@ -743,8 +743,60 @@ typedef enum
 {
   PREDICATE_OPERATOR_EQUAL_COLUMNS,
   PREDICATE_OPERATOR_EQUAL_CONSTANT,
-  PREDICATE_OPERATOR_STRING_PREFIX_EQUAL,
+  PREDICATE_OPERATOR_STRING_LIKE,
 } PredicateOperator;
+
+static bool32 string_like_operator(StringSlice string, StringSlice pattern)
+{
+  size_t pi = 0;
+  for (size_t si = 0, pi = 0; si < string.length && pi < pattern.length;
+       ++si, ++pi)
+  {
+    if (pattern.data[pi] != '%')
+    {
+      if (string.data[si] != pattern.data[pi])
+      {
+        return false;
+      }
+      continue;
+    }
+
+    pi += 1;
+    if (pi == pattern.length)
+    {
+      return true;
+    }
+
+    if (pattern.data[pi] == '%')
+    {
+      if (string.data[si] != '%')
+      {
+        return false;
+      }
+      continue;
+    }
+
+    StringSlice from = (StringSlice){
+        .data = string.data + si,
+        .length = string.length - si,
+    };
+    StringSlice remaining_pattern = (StringSlice){
+        .data = pattern.data + pi + 1,
+        .length = pattern.length - pi - 1,
+    };
+    while (from.length > 0)
+    {
+      from = string_slice_find_past(from, pattern.data[pi]);
+      if (string_like_operator(from, remaining_pattern))
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  return pi == pattern.length;
+}
 
 typedef enum
 {
@@ -1111,8 +1163,8 @@ bool32 tuple_iterator_select_tuple(TupleIterator *it)
             .string,
         it->select.predicate.constant.value.string);
 
-  case PREDICATE_OPERATOR_GRANULAR_STRING_PREFIX_EQUAL:
-    return string_slice_prefix_eq(
+  case PREDICATE_OPERATOR_GRANULAR_STRING_LIKE:
+    return string_like_operator(
         tuple_iterator_column_value(
             it->select.it, it->select.predicate.constant.column_index)
             .string,
@@ -1389,7 +1441,7 @@ static DatabaseQueryError database_query(
       }
       break;
 
-      case PREDICATE_OPERATOR_STRING_PREFIX_EQUAL:
+      case PREDICATE_OPERATOR_STRING_LIKE:
       {
         if (!tuple_iterator_find_column_name(
                 iter,
@@ -1409,7 +1461,7 @@ static DatabaseQueryError database_query(
           break;
         }
 
-        op = PREDICATE_OPERATOR_GRANULAR_STRING_PREFIX_EQUAL;
+        op = PREDICATE_OPERATOR_GRANULAR_STRING_LIKE;
       }
       break;
 
