@@ -16,6 +16,8 @@ typedef enum
   TOKEN_KEYWORD_FROM,
   TOKEN_KEYWORD_WHERE,
   TOKEN_KEYWORD_LIKE,
+  TOKEN_KEYWORD_AND,
+  TOKEN_KEYWORD_OR,
 } Token;
 
 typedef struct
@@ -168,6 +170,20 @@ TokenData token_next_(const char **const start, const char *const end)
     return (TokenData){.token = TOKEN_KEYWORD_LIKE};
   }
 
+  StringSlice AND = string_slice_from_ptr("AND");
+  if (string_slice_prefix_eq(remaining, AND))
+  {
+    *start += AND.length;
+    return (TokenData){.token = TOKEN_KEYWORD_AND};
+  }
+
+  StringSlice OR = string_slice_from_ptr("OR");
+  if (string_slice_prefix_eq(remaining, OR))
+  {
+    *start += OR.length;
+    return (TokenData){.token = TOKEN_KEYWORD_OR};
+  }
+
   const char *identifier_start = *start;
   for (; *start != end && is_alpha(**start); *start += 1) {}
 
@@ -222,6 +238,8 @@ SqlParseError sql_parse_select(
   case TOKEN_KEYWORD_FROM:
   case TOKEN_KEYWORD_LIKE:
   case TOKEN_KEYWORD_WHERE:
+  case TOKEN_KEYWORD_AND:
+  case TOKEN_KEYWORD_OR:
   case TOKEN_IDENTIFIER:
   case TOKEN_STRING:
   case TOKEN_NUMBER:
@@ -253,6 +271,8 @@ SqlParseError sql_parse_select(
     case TOKEN_KEYWORD_FROM:
     case TOKEN_KEYWORD_WHERE:
     case TOKEN_KEYWORD_LIKE:
+    case TOKEN_KEYWORD_AND:
+    case TOKEN_KEYWORD_OR:
     case TOKEN_STRING:
     case TOKEN_NUMBER:
     case TOKEN_COMMA:
@@ -305,6 +325,8 @@ SqlParseError sql_parse_from(
   case TOKEN_KEYWORD_SELECT:
   case TOKEN_KEYWORD_WHERE:
   case TOKEN_KEYWORD_LIKE:
+  case TOKEN_KEYWORD_AND:
+  case TOKEN_KEYWORD_OR:
   case TOKEN_IDENTIFIER:
   case TOKEN_STRING:
   case TOKEN_NUMBER:
@@ -330,6 +352,8 @@ SqlParseError sql_parse_from(
     case TOKEN_KEYWORD_FROM:
     case TOKEN_KEYWORD_WHERE:
     case TOKEN_KEYWORD_LIKE:
+    case TOKEN_KEYWORD_AND:
+    case TOKEN_KEYWORD_OR:
     case TOKEN_STRING:
     case TOKEN_NUMBER:
     case TOKEN_EQUAL:
@@ -365,11 +389,11 @@ SqlParseError sql_parse_from(
   return SQL_PARSE_ERROR_OK;
 }
 
-SqlParseError sql_parse_predicate(
-    StringSlice *remaining, SelectQueryParameterVariable *predicate)
+SqlParseError sql_parse_predicate_variable(
+    StringSlice *remaining, SelectQueryParameterVariable *variable)
 {
   assert(remaining != NULL);
-  assert(predicate != NULL);
+  assert(variable != NULL);
 
   TokenData data = token_next(remaining);
   switch (data.token)
@@ -381,6 +405,8 @@ SqlParseError sql_parse_predicate(
   case TOKEN_KEYWORD_FROM:
   case TOKEN_KEYWORD_WHERE:
   case TOKEN_KEYWORD_LIKE:
+  case TOKEN_KEYWORD_AND:
+  case TOKEN_KEYWORD_OR:
   case TOKEN_EQUAL:
   case TOKEN_COMMA:
   case TOKEN_ASTERISK:
@@ -389,7 +415,7 @@ SqlParseError sql_parse_predicate(
     return SQL_PARSE_ERROR_UNEXPECTED_TOKEN;
 
   case TOKEN_STRING:
-    *predicate = (SelectQueryParameterVariable){
+    *variable = (SelectQueryParameterVariable){
         .type = PREDICATE_VARIABLE_TYPE_CONSTANT,
         .constant =
             {
@@ -400,7 +426,7 @@ SqlParseError sql_parse_predicate(
     break;
 
   case TOKEN_NUMBER:
-    *predicate = (SelectQueryParameterVariable){
+    *variable = (SelectQueryParameterVariable){
         .type = PREDICATE_VARIABLE_TYPE_CONSTANT,
         .constant =
             {
@@ -411,7 +437,7 @@ SqlParseError sql_parse_predicate(
     break;
 
   case TOKEN_IDENTIFIER:
-    *predicate = (SelectQueryParameterVariable){
+    *variable = (SelectQueryParameterVariable){
         .type = PREDICATE_VARIABLE_TYPE_COLUMN,
         .column_name = data.string,
     };
@@ -421,15 +447,22 @@ SqlParseError sql_parse_predicate(
   return SQL_PARSE_ERROR_OK;
 }
 
+typedef struct
+{
+  size_t length;
+  SelectQueryCondition *conditions;
+} ParsedWhereCondition;
+
 SqlParseError sql_parse_where(
     StringSlice *remaining,
-    PredicateOperator *operator,
-    SelectQueryParameterVariable * lhs,
-    SelectQueryParameterVariable *rhs)
+    ParsedWhereCondition **where_conditions,
+    size_t *where_length)
 {
   assert(remaining != NULL);
-  assert(lhs != NULL);
-  assert(rhs != NULL);
+  assert(where_conditions != NULL);
+  assert(*where_conditions == NULL);
+  assert(where_length != NULL);
+  assert(*where_length == 0);
 
   switch (token_next(remaining).token)
   {
@@ -439,6 +472,8 @@ SqlParseError sql_parse_where(
   case TOKEN_KEYWORD_SELECT:
   case TOKEN_KEYWORD_FROM:
   case TOKEN_KEYWORD_LIKE:
+  case TOKEN_KEYWORD_AND:
+  case TOKEN_KEYWORD_OR:
   case TOKEN_IDENTIFIER:
   case TOKEN_STRING:
   case TOKEN_NUMBER:
@@ -453,41 +488,141 @@ SqlParseError sql_parse_where(
     break;
   }
 
-  SqlParseError error = sql_parse_predicate(remaining, lhs);
-  if (error != SQL_PARSE_ERROR_OK)
+  SqlParseError error = SQL_PARSE_ERROR_OK;
+  SelectQueryCondition *conditions = NULL;
+  size_t length = 0;
+  for (; error == SQL_PARSE_ERROR_OK;)
   {
-    return error;
+    SelectQueryParameterVariable lhs = {};
+    error = sql_parse_predicate_variable(remaining, &lhs);
+    if (error != SQL_PARSE_ERROR_OK)
+    {
+      break;
+    }
+
+    PredicateOperator operator= {};
+    switch (token_next(remaining).token)
+    {
+    case TOKEN_END_OF_FILE:
+      error = SQL_PARSE_ERROR_UNEXPECTED_END_OF_STRING;
+      break;
+
+    case TOKEN_KEYWORD_SELECT:
+    case TOKEN_KEYWORD_FROM:
+    case TOKEN_KEYWORD_WHERE:
+    case TOKEN_KEYWORD_AND:
+    case TOKEN_KEYWORD_OR:
+    case TOKEN_ASTERISK:
+    case TOKEN_IDENTIFIER:
+    case TOKEN_STRING:
+    case TOKEN_NUMBER:
+    case TOKEN_COMMA:
+    case TOKEN_SEMICOLON:
+    case TOKEN_INVALID:
+      error = SQL_PARSE_ERROR_UNEXPECTED_TOKEN;
+      break;
+
+    case TOKEN_EQUAL:
+      operator= PREDICATE_OPERATOR_EQUAL;
+      break;
+
+    case TOKEN_KEYWORD_LIKE:
+      operator= PREDICATE_OPERATOR_STRING_LIKE;
+      break;
+    }
+    if (error != SQL_PARSE_ERROR_OK)
+    {
+      break;
+    }
+
+    SelectQueryParameterVariable rhs = {};
+    error = sql_parse_predicate_variable(remaining, &rhs);
+    if (error != SQL_PARSE_ERROR_OK)
+    {
+      break;
+    }
+
+    if (reallocate_update_length(
+            sizeof(*conditions), (void **)&conditions, &length, length + 1)
+        != ALLOCATE_OK)
+    {
+      error = SQL_PARSE_ERROR_OUT_OF_MEMORY;
+      break;
+    }
+
+    conditions[length - 1] = (SelectQueryCondition){
+        .operator= operator,
+        .lhs = lhs,
+        .rhs = rhs,
+    };
+
+    bool32 stop = false;
+    TokenData data = token_peek(*remaining);
+    if (data.token == TOKEN_SEMICOLON)
+    {
+      stop = true;
+    }
+    else
+    {
+      token_next(remaining);
+    }
+
+    switch (data.token)
+    {
+    case TOKEN_END_OF_FILE:
+      error = SQL_PARSE_ERROR_UNEXPECTED_END_OF_STRING;
+      break;
+
+    case TOKEN_KEYWORD_SELECT:
+    case TOKEN_KEYWORD_FROM:
+    case TOKEN_KEYWORD_WHERE:
+    case TOKEN_ASTERISK:
+    case TOKEN_IDENTIFIER:
+    case TOKEN_STRING:
+    case TOKEN_NUMBER:
+    case TOKEN_COMMA:
+    case TOKEN_INVALID:
+    case TOKEN_EQUAL:
+    case TOKEN_KEYWORD_LIKE:
+      error = SQL_PARSE_ERROR_UNEXPECTED_TOKEN;
+      break;
+
+    case TOKEN_KEYWORD_OR:
+      break;
+
+    case TOKEN_SEMICOLON:
+    case TOKEN_KEYWORD_AND:
+      if (reallocate_update_length(
+              sizeof(**where_conditions),
+              (void **)where_conditions,
+              where_length,
+              *where_length + 1)
+          != ALLOCATE_OK)
+      {
+        error = SQL_PARSE_ERROR_OUT_OF_MEMORY;
+        break;
+      }
+
+      (*where_conditions)[*where_length - 1] = (ParsedWhereCondition){
+          .length = length,
+          .conditions = conditions,
+      };
+
+      conditions = NULL;
+      length = 0;
+
+      break;
+    }
+
+    if (stop)
+    {
+      break;
+    }
   }
 
-  switch (token_next(remaining).token)
-  {
-  case TOKEN_END_OF_FILE:
-    return SQL_PARSE_ERROR_UNEXPECTED_END_OF_STRING;
-
-  case TOKEN_KEYWORD_SELECT:
-  case TOKEN_KEYWORD_FROM:
-  case TOKEN_KEYWORD_WHERE:
-  case TOKEN_ASTERISK:
-  case TOKEN_IDENTIFIER:
-  case TOKEN_STRING:
-  case TOKEN_NUMBER:
-  case TOKEN_COMMA:
-  case TOKEN_SEMICOLON:
-  case TOKEN_INVALID:
-    return SQL_PARSE_ERROR_UNEXPECTED_TOKEN;
-
-  case TOKEN_EQUAL:
-    *operator= PREDICATE_OPERATOR_EQUAL;
-    break;
-
-  case TOKEN_KEYWORD_LIKE:
-    *operator= PREDICATE_OPERATOR_STRING_LIKE;
-    break;
-  }
-
-  error = sql_parse_predicate(remaining, rhs);
   if (error != SQL_PARSE_ERROR_OK)
   {
+    deallocate(conditions, sizeof(*conditions) * (length + 1));
     return error;
   }
 
@@ -500,6 +635,8 @@ SqlParseError sql_parse_query(
     size_t *const select_length,
     StringSlice **const from_names,
     size_t *const from_length,
+    ParsedWhereCondition **conditions,
+    size_t *conditions_length,
     QueryParameter **parameters,
     size_t *parameters_length)
 {
@@ -513,6 +650,10 @@ SqlParseError sql_parse_query(
   assert(*from_names == NULL);
   assert(from_length != NULL);
   assert(*from_length == 0);
+  assert(conditions != NULL);
+  assert(*conditions == NULL);
+  assert(conditions_length != NULL);
+  assert(*conditions_length == 0);
 
   StringSlice remaining = query;
   SqlParseError status =
@@ -528,12 +669,9 @@ SqlParseError sql_parse_query(
     return status;
   }
 
-  PredicateOperator operator= PREDICATE_OPERATOR_TRUE;
-  SelectQueryParameterVariable lhs = {};
-  SelectQueryParameterVariable rhs = {};
   if (token_peek(remaining).token == TOKEN_KEYWORD_WHERE)
   {
-    status = sql_parse_where(&remaining, &operator, & lhs, &rhs);
+    status = sql_parse_where(&remaining, conditions, conditions_length);
     if (status != SQL_PARSE_ERROR_OK)
     {
       return status;
@@ -583,32 +721,28 @@ SqlParseError sql_parse_query(
     }
   }
 
-  if (reallocate_update_length(
-          sizeof(**parameters),
-          (void **)parameters,
-          parameters_length,
-          *parameters_length + 1)
-      != ALLOCATE_OK)
+  for (size_t i = 0; i < *conditions_length; ++i)
   {
-    return SQL_PARSE_ERROR_OUT_OF_MEMORY;
-  }
+    if (reallocate_update_length(
+            sizeof(**parameters),
+            (void **)parameters,
+            parameters_length,
+            *parameters_length + 1)
+        != ALLOCATE_OK)
+    {
+      return SQL_PARSE_ERROR_OUT_OF_MEMORY;
+    }
 
-  (*parameters)[*parameters_length - 1] = (QueryParameter){
-      .operator= QUERY_OPERATOR_SELECT,
-      .select =
-          {
-              .query_index = *parameters_length - 2,
-              .length = 1,
-              .conditions =
-                  (SelectQueryCondition[]){
-                      {
-                          .operator= operator,
-                          .lhs = lhs,
-                          .rhs = rhs,
-                      },
-                  },
-          },
-  };
+    (*parameters)[*parameters_length - 1] = (QueryParameter){
+        .operator= QUERY_OPERATOR_SELECT,
+        .select =
+            {
+                .query_index = *parameters_length - 2,
+                .length = (*conditions)[i].length,
+                .conditions = (*conditions)[i].conditions,
+            },
+    };
+  }
 
   if (*select_names != NULL)
   {

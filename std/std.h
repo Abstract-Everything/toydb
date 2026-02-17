@@ -99,18 +99,21 @@ static AllocateError reallocate_update_length(
   assert(object_size > 0);
   assert(memory != NULL);
   assert(length != NULL);
-  assert(*memory == NULL || *length > 0);
 
   void *new_memory = NULL;
+
   if (allocate(&new_memory, object_size * new_length) == ALLOCATE_OUT_OF_MEMORY)
   {
     return ALLOCATE_OUT_OF_MEMORY;
   }
 
-  memory_copy_forward(
-      new_memory, *memory, object_size * MIN(*length, new_length));
+  if (*memory != NULL)
+  {
+    memory_copy_forward(
+        new_memory, *memory, object_size * MIN(*length, new_length));
 
-  deallocate(*memory, object_size * *length);
+    deallocate(*memory, object_size * *length);
+  }
 
   *memory = new_memory;
   *length = new_length;

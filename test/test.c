@@ -71,6 +71,8 @@ static void run_sql_query(Database *db, StringSlice query)
   size_t select_length = 0;
   StringSlice *from_names = NULL;
   size_t from_length = 0;
+  size_t conditions_length = 0;
+  ParsedWhereCondition *conditions = NULL;
   size_t parameters_length = 0;
   QueryParameter *parameters = NULL;
   assert(
@@ -80,6 +82,8 @@ static void run_sql_query(Database *db, StringSlice query)
           &select_length,
           &from_names,
           &from_length,
+          &conditions,
+          &conditions_length,
           &parameters,
           &parameters_length)
       == SQL_PARSE_ERROR_OK);
@@ -88,6 +92,12 @@ static void run_sql_query(Database *db, StringSlice query)
 
   deallocate(select_names, sizeof(*select_names) * select_length);
   deallocate(from_names, sizeof(*from_names) * from_length);
+  for (size_t i = 0; i < conditions_length; ++i)
+  {
+    deallocate(
+        conditions[i].conditions, sizeof(*conditions) * conditions[i].length);
+  }
+  deallocate(conditions, sizeof(*conditions) * conditions_length);
   deallocate(parameters, sizeof(*parameters) * parameters_length);
 }
 
@@ -562,6 +572,26 @@ void sql_where_email_prefix_user(Database *db)
           "WHERE email LIKE 'user%';"));
 }
 
+void sql_where_email_or_id_equal(Database *db)
+{
+  run_sql_query(
+      db,
+      string_slice_from_ptr(
+          "SELECT *\n"
+          "FROM users, shopping_cart\n"
+          "WHERE id = 2 OR email LIKE 'user%';"));
+}
+
+void sql_where_email_and_id_equal(Database *db)
+{
+  run_sql_query(
+      db,
+      string_slice_from_ptr(
+          "SELECT *\n"
+          "FROM users, shopping_cart\n"
+          "WHERE id = 0 AND item LIKE 'b%';"));
+}
+
 void sql_manual_join(Database *db)
 {
   run_sql_query(
@@ -571,6 +601,7 @@ void sql_manual_join(Database *db)
           "FROM users, shopping_cart\n"
           "WHERE users.id = shopping_cart.user_id;"));
 }
+
 int main(int argc, char *argv[])
 {
   UNUSED(argc);
@@ -619,6 +650,8 @@ int main(int argc, char *argv[])
   sql_select_users_id_email(&db);
   sql_select_from_users_and_shopping_cart(&db);
   sql_where_email_prefix_user(&db);
+  sql_where_email_or_id_equal(&db);
+  sql_where_email_and_id_equal(&db);
   sql_manual_join(&db);
 
   printf("Deleting user with id 0\n");
