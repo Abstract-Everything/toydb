@@ -403,21 +403,28 @@ static void query_select_email(Database *db)
        .select =
            {
                .query_index = 0,
-               .operator = PREDICATE_OPERATOR_STRING_LIKE,
-               .lhs =
-                   {
-                       .type = PREDICATE_VARIABLE_TYPE_COLUMN,
-                       .column_name =
-                           string_slice_from_ptr(users_relation_names[1]),
-                   },
-               .rhs =
-                   {
-                       .type = PREDICATE_VARIABLE_TYPE_CONSTANT,
-                       .constant =
-                           {
-                               .type = COLUMN_TYPE_STRING,
-                               .value.string = string_slice_from_ptr("user%"),
-                           },
+               .length = 1,
+               .conditions =
+                   (SelectQueryCondition[]){
+                       {
+                           .operator = PREDICATE_OPERATOR_STRING_LIKE,
+                           .lhs =
+                               {
+                                   .type = PREDICATE_VARIABLE_TYPE_COLUMN,
+                                   .column_name = string_slice_from_ptr(
+                                       users_relation_names[1]),
+                               },
+                           .rhs =
+                               {
+                                   .type = PREDICATE_VARIABLE_TYPE_CONSTANT,
+                                   .constant =
+                                       {
+                                           .type = COLUMN_TYPE_STRING,
+                                           .value.string =
+                                               string_slice_from_ptr("user%"),
+                                       },
+                               },
+                       },
                    },
            }},
   };
@@ -454,23 +461,32 @@ static void multi_stage_query(Database *db)
        .read_relation_name = string_slice_from_ptr(SHOPPING_CART_TABLE_NAME)},
       {.operator = QUERY_OPERATOR_CARTESIAN_PRODUCT,
        .cartesian_product = {.lhs_index = 0, .rhs_index = 1}},
-      {.operator = QUERY_OPERATOR_SELECT,
-       .select =
-           {
-               .query_index = 2,
-               .operator = PREDICATE_OPERATOR_EQUAL,
-               .lhs =
-                   {
-                       .type = PREDICATE_VARIABLE_TYPE_COLUMN,
-                       .column_name = string_slice_from_ptr("users.id"),
-                   },
-               .rhs =
-                   {
-                       .type = PREDICATE_VARIABLE_TYPE_COLUMN,
-                       .column_name =
-                           string_slice_from_ptr("shopping_cart.user_id"),
-                   },
-           }},
+      {
+          .operator = QUERY_OPERATOR_SELECT,
+          .select =
+              {
+                  .query_index = 2,
+                  .length = 1,
+                  .conditions =
+                      (SelectQueryCondition[]){
+                          {
+                              .operator = PREDICATE_OPERATOR_EQUAL,
+                              .lhs =
+                                  {
+                                      .type = PREDICATE_VARIABLE_TYPE_COLUMN,
+                                      .column_name =
+                                          string_slice_from_ptr("users.id"),
+                                  },
+                              .rhs =
+                                  {
+                                      .type = PREDICATE_VARIABLE_TYPE_COLUMN,
+                                      .column_name = string_slice_from_ptr(
+                                          "shopping_cart.user_id"),
+                                  },
+                          },
+                      },
+              },
+      },
       {.operator = QUERY_OPERATOR_PROJECT,
        .project =
            {

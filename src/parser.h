@@ -598,9 +598,15 @@ SqlParseError sql_parse_query(
       .select =
           {
               .query_index = *parameters_length - 2,
-              .operator= operator,
-              .lhs = lhs,
-              .rhs = rhs,
+              .length = 1,
+              .conditions =
+                  (SelectQueryCondition[]){
+                      {
+                          .operator= operator,
+                          .lhs = lhs,
+                          .rhs = rhs,
+                      },
+                  },
           },
   };
 
