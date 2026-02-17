@@ -946,7 +946,7 @@ void tuple_iterator_destroy(TupleIterator *it)
   {
     deallocate(
         it->project.mapped_ids,
-        sizeof(it->project.mapped_ids) * it->project.tuple_length);
+        sizeof(*it->project.mapped_ids) * it->project.tuple_length);
   }
   break;
 
