@@ -403,12 +403,14 @@ static DatabaseGetRelationColumnMetadataError
 database_get_relation_column_metadata_(
     Database *db,
     StringSlice relation_name,
+    bool32 *is_internal,
     MemoryStore **store,
     ColumnsLength *tuple_length_,
     ColumnType **types,
     String **names)
 {
   assert(db != NULL);
+  assert(is_internal != NULL);
   assert(store != NULL);
   assert(*store == NULL);
   assert(tuple_length_ != NULL);
@@ -434,6 +436,7 @@ database_get_relation_column_metadata_(
 
     *tuple_length_ = tuple_length;
     *store = &db->relations;
+    *is_internal = true;
     return DATABASE_GET_RELATION_COLUMN_METADATA_OK;
   }
 
@@ -456,6 +459,7 @@ database_get_relation_column_metadata_(
 
     *tuple_length_ = tuple_length;
     *store = &db->relation_columns;
+    *is_internal = true;
     return DATABASE_GET_RELATION_COLUMN_METADATA_OK;
   }
 
@@ -569,6 +573,7 @@ database_get_relation_column_metadata_(
     return DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY;
   }
 
+  *is_internal = false;
   *tuple_length_ = (ColumnsLength)tuple_length;
   *store =
       &db->user_relations[find_user_relation_index(*db, relation_id)].store;
@@ -590,14 +595,16 @@ database_get_relation_column_metadata(
   assert(names != NULL);
   assert(*names == NULL);
 
+  bool32 is_internal = false;
   return database_get_relation_column_metadata_(
-      db, relation_name, store, tuple_length, types, names);
+      db, relation_name, &is_internal, store, tuple_length, types, names);
 }
 
 static DatabaseGetRelationColumnMetadataError
 database_get_relation_column_types(
     Database *db,
     StringSlice relation_name,
+    bool32 *is_internal,
     MemoryStore **store,
     ColumnsLength *tuple_length,
     ColumnType **types)
@@ -606,7 +613,7 @@ database_get_relation_column_types(
   assert(*types == NULL);
 
   return database_get_relation_column_metadata_(
-      db, relation_name, store, tuple_length, types, NULL);
+      db, relation_name, is_internal, store, tuple_length, types, NULL);
 }
 
 typedef enum
@@ -631,8 +638,9 @@ static DatabaseInsertTupleError database_insert_tuple(
   ColumnType *columns_types = NULL;
   ColumnsLength columns_length = 0;
   MemoryStore *store = NULL;
+  bool32 is_internal = true;
   switch (database_get_relation_column_types(
-      db, name, &store, &columns_length, &columns_types))
+      db, name, &is_internal, &store, &columns_length, &columns_types))
   {
   case DATABASE_GET_RELATION_COLUMN_METADATA_OK:
     break;
@@ -641,6 +649,11 @@ static DatabaseInsertTupleError database_insert_tuple(
     return DATABASE_INSERT_TUPLE_OUT_OF_MEMORY;
 
   case DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND:
+    return DATABASE_INSERT_TUPLE_RELATION_NOT_FOUND;
+  }
+
+  if (is_internal)
+  {
     return DATABASE_INSERT_TUPLE_RELATION_NOT_FOUND;
   }
 
@@ -690,8 +703,9 @@ static DatabaseDeleteTuplesError database_delete_tuples(
   ColumnType *columns_types = NULL;
   ColumnsLength columns_length = 0;
   MemoryStore *store = NULL;
+  bool32 is_internal = true;
   switch (database_get_relation_column_types(
-      db, name, &store, &columns_length, &columns_types))
+      db, name, &is_internal, &store, &columns_length, &columns_types))
   {
   case DATABASE_GET_RELATION_COLUMN_METADATA_OK:
     break;
@@ -700,6 +714,11 @@ static DatabaseDeleteTuplesError database_delete_tuples(
     return DATABASE_DELETE_TUPLES_OUT_OF_MEMORY;
 
   case DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND:
+    return DATABASE_DELETE_TUPLES_RELATION_NOT_FOUND;
+  }
+
+  if (is_internal)
+  {
     return DATABASE_DELETE_TUPLES_RELATION_NOT_FOUND;
   }
 
