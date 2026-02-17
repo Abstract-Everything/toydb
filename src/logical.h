@@ -982,61 +982,6 @@ void tuple_iterator_destroy(TupleIterator *it)
   }
 }
 
-static TupleIterator read_tuple_iterator(
-    MemoryStore *store,
-    String *names,
-    ColumnType *types,
-    ColumnsLength tuple_length)
-{
-  return (TupleIterator){
-      .operator= QUERY_OPERATOR_READ,
-      .read =
-          {
-              .it = memory_store_iterate(store),
-              .column_names = names,
-              .column_types = types,
-              .tuple_length = tuple_length,
-          },
-  };
-}
-
-static TupleIterator project_tuple_iterator(
-    TupleIterator *it, ColumnsLength tuple_length, ColumnsLength *mapped_ids)
-{
-  return (TupleIterator){
-      .operator= QUERY_OPERATOR_PROJECT,
-      .project =
-          {
-              .it = it,
-              .tuple_length = tuple_length,
-              .mapped_ids = mapped_ids,
-          },
-  };
-}
-
-static TupleIterator select_tuple_iterator(
-    TupleIterator *it, size_t length, TupleIteratorCondition *conditions)
-{
-  return (TupleIterator){
-      .operator= QUERY_OPERATOR_SELECT,
-      .select =
-          {
-              .it = it,
-              .length = length,
-              .conditions = conditions,
-          },
-  };
-}
-
-static TupleIterator
-cartesian_product_tuple_iterator(TupleIterator *lhs, TupleIterator *rhs)
-{
-  return (TupleIterator){
-      .operator= QUERY_OPERATOR_CARTESIAN_PRODUCT,
-      .cartesian_product = {.lhs = lhs, .rhs = rhs},
-  };
-}
-
 static ColumnsLength tuple_iterator_tuple_length(TupleIterator *it)
 {
   switch (it->operator)
@@ -1489,7 +1434,15 @@ DatabaseQueryError database_query_select(
     };
   }
 
-  *result = select_tuple_iterator(it, select.length, conditions);
+  *result = (TupleIterator){
+      .operator= QUERY_OPERATOR_SELECT,
+      .select =
+          {
+              .it = it,
+              .length = select.length,
+              .conditions = conditions,
+          },
+  };
 
   return DATABASE_QUERY_OK;
 }
@@ -1534,8 +1487,16 @@ static DatabaseQueryError database_query(
           &names))
       {
       case DATABASE_GET_RELATION_COLUMN_METADATA_OK:
-        iterators[query] =
-            read_tuple_iterator(store, names, types, tuple_length);
+        iterators[query] = (TupleIterator){
+            .operator= QUERY_OPERATOR_READ,
+            .read =
+                {
+                    .it = memory_store_iterate(store),
+                    .column_names = names,
+                    .column_types = types,
+                    .tuple_length = tuple_length,
+                },
+        };
         break;
 
       case DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY:
@@ -1580,8 +1541,15 @@ static DatabaseQueryError database_query(
         break;
       }
 
-      iterators[query] =
-          project_tuple_iterator(iter, project.tuple_length, mapped_ids);
+      iterators[query] = (TupleIterator){
+          .operator= QUERY_OPERATOR_PROJECT,
+          .project =
+              {
+                  .it = iter,
+                  .tuple_length = project.tuple_length,
+                  .mapped_ids = mapped_ids,
+              },
+      };
     }
     break;
 
@@ -1597,9 +1565,14 @@ static DatabaseQueryError database_query(
     {
       CartesianProductQueryParameter cartesian_product =
           parameters[query].cartesian_product;
-      iterators[query] = cartesian_product_tuple_iterator(
-          &iterators[cartesian_product.lhs_index],
-          &iterators[cartesian_product.rhs_index]);
+      iterators[query] = (TupleIterator){
+          .operator= QUERY_OPERATOR_CARTESIAN_PRODUCT,
+          .cartesian_product =
+              {
+                  .lhs = &iterators[cartesian_product.lhs_index],
+                  .rhs = &iterators[cartesian_product.rhs_index],
+              },
+      };
     }
     break;
     }
