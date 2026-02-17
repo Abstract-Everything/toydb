@@ -59,28 +59,24 @@ TokenData token_next_(const char **const start, const char *const end)
     return (TokenData){.token = TOKEN_END_OF_FILE};
   }
 
-  if (**start == '*')
+  const struct
   {
-    *start += 1;
-    return (TokenData){.token = TOKEN_ASTERISK};
-  }
+    Token token;
+    char character;
+  } tokenizable_characters[] = {
+      {TOKEN_ASTERISK, '*'},
+      {TOKEN_COMMA, ','},
+      {TOKEN_SEMICOLON, ';'},
+      {TOKEN_EQUAL, '='},
+  };
 
-  if (**start == ',')
+  for (size_t i = 0; i < ARRAY_LENGTH(tokenizable_characters); ++i)
   {
-    *start += 1;
-    return (TokenData){.token = TOKEN_COMMA};
-  }
-
-  if (**start == ';')
-  {
-    *start += 1;
-    return (TokenData){.token = TOKEN_SEMICOLON};
-  }
-
-  if (**start == '=')
-  {
-    *start += 1;
-    return (TokenData){.token = TOKEN_EQUAL};
+    if (**start == tokenizable_characters[i].character)
+    {
+      *start += 1;
+      return (TokenData){.token = tokenizable_characters[i].token};
+    }
   }
 
   if (is_number(**start))
@@ -142,46 +138,26 @@ TokenData token_next_(const char **const start, const char *const end)
       .length = end - *start,
   };
 
-  StringSlice SELECT = string_slice_from_ptr("SELECT");
-  if (string_slice_prefix_eq(remaining, SELECT))
+  const struct
   {
-    *start += SELECT.length;
-    return (TokenData){.token = TOKEN_KEYWORD_SELECT};
-  }
+    Token token;
+    StringSlice string;
+  } tokenizable_keywords[] = {
+      {TOKEN_KEYWORD_SELECT, string_slice_from_ptr("SELECT")},
+      {TOKEN_KEYWORD_FROM, string_slice_from_ptr("FROM")},
+      {TOKEN_KEYWORD_WHERE, string_slice_from_ptr("WHERE")},
+      {TOKEN_KEYWORD_LIKE, string_slice_from_ptr("LIKE")},
+      {TOKEN_KEYWORD_AND, string_slice_from_ptr("AND")},
+      {TOKEN_KEYWORD_OR, string_slice_from_ptr("OR")},
+  };
 
-  StringSlice FROM = string_slice_from_ptr("FROM");
-  if (string_slice_prefix_eq(remaining, FROM))
+  for (size_t i = 0; i < ARRAY_LENGTH(tokenizable_keywords); ++i)
   {
-    *start += FROM.length;
-    return (TokenData){.token = TOKEN_KEYWORD_FROM};
-  }
-
-  StringSlice WHERE = string_slice_from_ptr("WHERE");
-  if (string_slice_prefix_eq(remaining, WHERE))
-  {
-    *start += WHERE.length;
-    return (TokenData){.token = TOKEN_KEYWORD_WHERE};
-  }
-
-  StringSlice LIKE = string_slice_from_ptr("LIKE");
-  if (string_slice_prefix_eq(remaining, LIKE))
-  {
-    *start += LIKE.length;
-    return (TokenData){.token = TOKEN_KEYWORD_LIKE};
-  }
-
-  StringSlice AND = string_slice_from_ptr("AND");
-  if (string_slice_prefix_eq(remaining, AND))
-  {
-    *start += AND.length;
-    return (TokenData){.token = TOKEN_KEYWORD_AND};
-  }
-
-  StringSlice OR = string_slice_from_ptr("OR");
-  if (string_slice_prefix_eq(remaining, OR))
-  {
-    *start += OR.length;
-    return (TokenData){.token = TOKEN_KEYWORD_OR};
+    if (string_slice_prefix_eq(remaining, tokenizable_keywords[i].string))
+    {
+      *start += tokenizable_keywords[i].string.length;
+      return (TokenData){.token = tokenizable_keywords[i].token};
+    }
   }
 
   const char *identifier_start = *start;
