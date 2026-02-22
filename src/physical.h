@@ -1,11 +1,16 @@
 #ifndef PHYSICAL_H
 
+#include "linux.h"
 #include "std.h"
 
-#define PAGE_SIZE KIBIBYTES(8)
+#define PAGE_SIZE (size_t)KIBIBYTES(8)
 
 // Limit number of columns to 2^16
 typedef int16_t ColumnsLength;
+
+typedef int64_t RelationId;
+
+typedef size_t BlockIndex;
 
 // ----- Store types -----
 typedef int64_t StoreInteger;
@@ -81,14 +86,16 @@ typedef struct
 } TupleSizes;
 
 static TupleSizes tuple_column_fixed_and_variable_size(
-    const ColumnType *types, const ColumnValue *values, int64_t length)
+    const ColumnType *types,
+    const ColumnValue *values,
+    ColumnsLength tuple_length)
 {
   assert(types != NULL);
   assert(values != NULL);
 
   size_t fixed_size = 0;
   size_t variable_size = 0;
-  for (int64_t i = 0; i < length; ++i)
+  for (int64_t i = 0; i < tuple_length; ++i)
   {
     fixed_size += column_type_fixed_size(types[i]);
     variable_size += column_type_variable_size(types[i], values[i]);
@@ -99,12 +106,13 @@ static TupleSizes tuple_column_fixed_and_variable_size(
   };
 }
 
-static size_t tuple_column_fixed_size(const ColumnType *types, int64_t length)
+static size_t
+tuple_column_fixed_size(const ColumnType *types, ColumnsLength tuple_length)
 {
   assert(types != NULL);
 
   size_t fixed_size = 0;
-  for (size_t i = 0; i < length; ++i)
+  for (size_t i = 0; i < tuple_length; ++i)
   {
     fixed_size += column_type_fixed_size(types[i]);
   }
@@ -124,196 +132,761 @@ static size_t tuple_column_fixed_byte_offset(
   return offset;
 }
 
+// ----- Disk buffer pool -----
+
 typedef struct
 {
   int16_t allocated_records;
   int16_t variable_data_start;
-} BlockHeader;
+} RelationHeader;
+
+typedef enum
+{
+  MAPPED_BUFFER_STATUS_USED,
+  MAPPED_BUFFER_STATUS_FREE,
+  MAPPED_BUFFER_STATUS_NEEDS_CLOSING,
+} MappedBufferStatus;
+
+// TODO: Support having a single buffer opened multiple times, this reduces
+// memory usage when multiple buffers read the same block from the same relation
+typedef struct
+{
+  MappedBufferStatus status;
+  // TODO: Share fds between buffers, don't create an fd per buffer due to
+  // limits
+  int fd;
+  RelationId relation_id;
+  BlockIndex block;
+  // NOTE: The total length of buffers is ALWAYS PAGE_SIZE
+  void *page;
+} MappedBuffer;
+
+RelationHeader *mapped_buffer_header(MappedBuffer buffer)
+{
+  return buffer.page;
+}
+
+void *
+mapped_buffer_tuple(MappedBuffer buffer, size_t fixed_size, size_t tuple_index)
+{
+  return buffer.page + sizeof(RelationHeader) + (fixed_size * tuple_index);
+}
+
+void *mapped_buffer_free_tuple(MappedBuffer buffer, TupleSizes tuple_sizes)
+{
+  return buffer.page + sizeof(RelationHeader)
+         + (tuple_sizes.fixed_size
+            * mapped_buffer_header(buffer)->allocated_records);
+}
+
+size_t mapped_buffer_free_space(MappedBuffer buffer, TupleSizes tuple_sizes)
+{
+  RelationHeader *header = mapped_buffer_header(buffer);
+  return header->variable_data_start
+         - (tuple_sizes.fixed_size * header->allocated_records);
+}
 
 typedef struct
 {
-  size_t blocks;
-  void *memory;
-} MemoryStore;
+  char save_path_buffer[LINUX_PATH_MAX];
+  StringSlice save_path;
+  size_t buffers_length;
+  MappedBuffer *buffers;
+  void *buffer_pages;
+} DiskBufferPool;
+
+typedef enum
+{
+  DISK_BUFFER_POOL_OPEN_OK,
+  DISK_BUFFER_POOL_OPEN_BUFFER_POOL_FULL,
+  DISK_BUFFER_POOL_OPEN_OPENING_FILE,
+  DISK_BUFFER_POOL_OPEN_SEEKING_FILE,
+  DISK_BUFFER_POOL_OPEN_READING_FILE,
+  DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL,
+} DiskBufferPoolOpenError;
 
 typedef struct
 {
-  void *memory;
-  BlockHeader *header;
-} Block;
+  size_t buffer_index;
+  DiskBufferPoolOpenError error;
+} DiskBufferPoolOpenResult;
 
-static Block memory_store_block(MemoryStore *store, size_t block)
+static void disk_buffer_pool_relation_id_to_path(
+    DiskBufferPool *pool, RelationId relation_id, char *path, size_t length)
 {
-  assert(store != NULL);
-  void *memory = &store->memory[PAGE_SIZE * block];
-  return (Block){
-      .memory = memory,
-      .header = memory,
+  size_t index = string_slice_concat(path, 0, length, pool->save_path, false);
+  index = string_slice_concat(
+      path, index, length, string_slice_from_ptr("/"), false);
+
+  size_t start_index = index;
+  if (relation_id == 0)
+  {
+    path[index++] = '0';
+  }
+
+  // TODO: Simplify
+  const RelationId base = 10;
+  for (RelationId id = relation_id; id > 0; id /= base, ++index)
+  {
+    path[index] = (char)('0' + (id % base));
+  }
+  size_t end_index = index - 1;
+
+  while (start_index < end_index)
+  {
+    char temp = path[start_index];
+    path[start_index] = path[end_index];
+    path[end_index] = temp;
+    start_index += 1;
+    end_index -= 1;
+  }
+
+  string_slice_concat(
+      path, index, length, string_slice_from_ptr(".relation"), true);
+}
+
+static void disk_buffer_pool_close(DiskBufferPool *pool, size_t buffer_index)
+{
+  switch (linux_close(pool->buffers[buffer_index].fd))
+  {
+  case LINUX_CLOSE_BAD_FD:
+    assert(false);
+    // Fallthrough
+  case LINUX_CLOSE_OK:
+    pool->buffers[buffer_index] =
+        (MappedBuffer){.status = MAPPED_BUFFER_STATUS_FREE};
+    break;
+
+  case LINUX_CLOSE_INTERRUPT:
+  case LINUX_CLOSE_IO:
+  case LINUX_CLOSE_QUOTA:
+  case LINUX_CLOSE_UNKNOWN:
+    pool->buffers[buffer_index].status = MAPPED_BUFFER_STATUS_NEEDS_CLOSING;
+    break;
+  }
+}
+
+typedef struct
+{
+  size_t index;
+  bool32 found;
+} DiskBufferPoolFindFreeBufferResult;
+
+static DiskBufferPoolFindFreeBufferResult
+disk_buffer_pool_find_free_buffer(DiskBufferPool *pool)
+{
+  for (size_t i = 0; i < pool->buffers_length; ++i)
+  {
+    switch (pool->buffers[i].status)
+    {
+    case MAPPED_BUFFER_STATUS_FREE:
+      return (DiskBufferPoolFindFreeBufferResult){
+          .index = i,
+          .found = true,
+      };
+
+    case MAPPED_BUFFER_STATUS_NEEDS_CLOSING:
+      disk_buffer_pool_close(pool, i);
+      if (pool->buffers[i].status != MAPPED_BUFFER_STATUS_NEEDS_CLOSING)
+      {
+        i -= 1;
+      }
+      break;
+
+    case MAPPED_BUFFER_STATUS_USED:
+      break;
+    }
+  }
+
+  return (DiskBufferPoolFindFreeBufferResult){
+      .index = 0,
+      .found = false,
   };
 }
 
-static void *memory_store_tuple(Block block, size_t fixed_size, size_t index)
+static DiskBufferPoolOpenResult
+disk_buffer_pool_open(DiskBufferPool *pool, RelationId id, BlockIndex block)
 {
-  return &block.memory[sizeof(BlockHeader) + fixed_size * index];
-}
+  DiskBufferPoolFindFreeBufferResult free_buffer_result =
+      disk_buffer_pool_find_free_buffer(pool);
 
-static AllocateError memory_store_new(MemoryStore *store, size_t blocks)
-{
-  assert(store != NULL);
-  assert(blocks > 0);
-
-  void *memory = NULL;
-  if (allocate(&memory, blocks * PAGE_SIZE) != ALLOCATE_OK)
+  if (!free_buffer_result.found)
   {
-    *store = (MemoryStore){
-        .blocks = 0,
-        .memory = NULL,
-    };
-    return ALLOCATE_OUT_OF_MEMORY;
+    return (DiskBufferPoolOpenResult){
+        .error = DISK_BUFFER_POOL_OPEN_BUFFER_POOL_FULL};
   }
 
-  *store = (MemoryStore){
-      .blocks = blocks,
-      .memory = memory,
+  void *page = &pool->buffer_pages[PAGE_SIZE * free_buffer_result.index];
+
+  int fd = 0;
+  {
+    char path[LINUX_PATH_MAX] = {};
+    disk_buffer_pool_relation_id_to_path(pool, id, path, ARRAY_LENGTH(path));
+    LinuxOpenResult open_result =
+        linux_open(path, LINUX_OPEN_DIRECT | LINUX_OPEN_READ_WRITE, 0);
+    if (open_result.error != LINUX_OPEN_OK)
+    {
+      return (DiskBufferPoolOpenResult){.error =
+                                            DISK_BUFFER_POOL_OPEN_OPENING_FILE};
+    }
+    fd = open_result.fd;
+  }
+
+  if (linux_seek(fd, PAGE_SIZE * block, LINUX_SEEK_SET) != LINUX_SEEK_OK)
+  {
+    assert(linux_close(fd) == LINUX_CLOSE_OK);
+    return (DiskBufferPoolOpenResult){.error =
+                                          DISK_BUFFER_POOL_OPEN_SEEKING_FILE};
+  }
+
+  LinuxReadResult read_result = linux_read(fd, page, PAGE_SIZE);
+  if (read_result.error != LINUX_READ_OK)
+  {
+    assert(linux_close(fd) == LINUX_CLOSE_OK);
+    return (DiskBufferPoolOpenResult){.error =
+                                          DISK_BUFFER_POOL_OPEN_READING_FILE};
+  }
+
+  if (read_result.count != PAGE_SIZE)
+  {
+    assert(linux_close(fd) == LINUX_CLOSE_OK);
+    return (DiskBufferPoolOpenResult){.error =
+                                          DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL};
+  }
+
+  pool->buffers[free_buffer_result.index] = (MappedBuffer){
+      .status = MAPPED_BUFFER_STATUS_USED,
+      .fd = fd,
+      .relation_id = id,
+      .block = block,
+      .page = page,
   };
 
-  for (size_t block_index = 0; block_index < blocks; ++block_index)
-  {
-    Block block = memory_store_block(store, block_index);
-    *block.header = (BlockHeader){
-        .allocated_records = 0,
-        .variable_data_start = PAGE_SIZE,
-    };
-  }
-
-  return ALLOCATE_OK;
-}
-
-static void memory_store_destroy(MemoryStore *store)
-{
-  assert(store != NULL);
-
-  deallocate(store->memory, store->blocks * PAGE_SIZE);
-  store->blocks = 0;
-  store->memory = NULL;
+  return (DiskBufferPoolOpenResult){
+      .buffer_index = free_buffer_result.index,
+      .error = DISK_BUFFER_POOL_OPEN_OK,
+  };
 }
 
 typedef enum
 {
-  MEMORY_STORE_INSERT_TUPLE_OK,
-  MEMORY_STORE_INSERT_TUPLE_NO_SPACE,
-} MemoryStoreInsertTupleError;
+  DISK_BUFFER_POOL_NEW_BLOCK_OPEN_OK,
+  DISK_BUFFER_POOL_NEW_BLOCK_OPEN_BUFFER_POOL_FULL,
+  DISK_BUFFER_POOL_NEW_BLOCK_OPEN_OPENING_FILE,
+  DISK_BUFFER_POOL_NEW_BLOCK_OPEN_RESIZE_FILE,
+  DISK_BUFFER_POOL_NEW_BLOCK_OPEN_READ_FILE_SIZE,
+  DISK_BUFFER_POOL_NEW_BLOCK_OPEN_SEEKING_FILE,
+  DISK_BUFFER_POOL_NEW_BLOCK_OPEN_READING_FILE,
+} DiskBufferPoolNewBlockOpenError;
 
-// TODO: This assumes that the column types do not change between inserts
-static MemoryStoreInsertTupleError memory_store_insert_tuple(
-    MemoryStore *store,
-    const ColumnType *types,
-    const ColumnValue *values,
-    ColumnsLength length)
+typedef struct
 {
-  assert(store != NULL);
-  assert(types != NULL);
-  assert(values != NULL);
-  assert(length > 0);
+  size_t buffer_index;
+  DiskBufferPoolNewBlockOpenError error;
+} DiskBufferPoolNewBlockOpenResult;
 
-  TupleSizes tuple_sizes =
-      tuple_column_fixed_and_variable_size(types, values, length);
+static DiskBufferPoolNewBlockOpenResult
+disk_buffer_pool_new_block_open(DiskBufferPool *pool, RelationId id)
+{
+  DiskBufferPoolFindFreeBufferResult free_buffer_result =
+      disk_buffer_pool_find_free_buffer(pool);
 
-  for (size_t i = 0; i < store->blocks; ++i)
+  if (!free_buffer_result.found)
   {
-    Block block = memory_store_block(store, i);
-    void *tuple_memory = memory_store_tuple(
-        block, tuple_sizes.fixed_size, block.header->allocated_records);
-
-    const size_t free_space =
-        block.header->variable_data_start - (tuple_memory - block.memory);
-    const size_t required_space =
-        tuple_sizes.fixed_size + tuple_sizes.variable_size;
-    if (free_space <= required_space)
-    {
-      continue;
-    }
-
-    for (ColumnsLength column = 0; column < length; ++column)
-    {
-      const size_t column_byte_offset =
-          tuple_column_fixed_byte_offset(types, length, column);
-
-      StoredValue *field = &tuple_memory[column_byte_offset];
-
-      switch (types[column])
-      {
-
-      case COLUMN_TYPE_INTEGER:
-      {
-        field->integer = values[column].integer;
-      }
-      break;
-
-      case COLUMN_TYPE_STRING:
-      {
-        size_t field_variable_size =
-            column_type_variable_size(types[column], values[column]);
-
-        block.header->variable_data_start -= field_variable_size;
-
-        memory_copy_forward(
-            &block.memory[block.header->variable_data_start],
-            values[column].string.data,
-            field_variable_size);
-
-        field->string = (StoreString){
-            .length = field_variable_size,
-            .offset = block.header->variable_data_start,
-        };
-      }
-      break;
-      }
-    }
-
-    block.header->allocated_records += 1;
-
-    assert(
-        memory_store_tuple(
-            block, tuple_sizes.fixed_size, block.header->allocated_records)
-        <= block.memory + block.header->variable_data_start);
-
-    return MEMORY_STORE_INSERT_TUPLE_OK;
+    return (DiskBufferPoolNewBlockOpenResult){
+        .error = DISK_BUFFER_POOL_NEW_BLOCK_OPEN_BUFFER_POOL_FULL};
   }
 
-  return MEMORY_STORE_INSERT_TUPLE_NO_SPACE;
+  void *page = &pool->buffer_pages[PAGE_SIZE * free_buffer_result.index];
+
+  int fd = 0;
+  {
+    char path[LINUX_PATH_MAX] = {};
+    disk_buffer_pool_relation_id_to_path(pool, id, path, ARRAY_LENGTH(path));
+    LinuxOpenResult open_result =
+        linux_open(path, LINUX_OPEN_DIRECT | LINUX_OPEN_READ_WRITE, 0);
+    if (open_result.error != LINUX_OPEN_OK)
+    {
+      return (DiskBufferPoolNewBlockOpenResult){
+          .error = DISK_BUFFER_POOL_NEW_BLOCK_OPEN_OPENING_FILE};
+    }
+    fd = open_result.fd;
+  }
+
+  LinuxFStatResult result = linux_fstat(fd);
+  if (result.error != LINUX_FSTAT_OK)
+  {
+    return (DiskBufferPoolNewBlockOpenResult){
+        .error = DISK_BUFFER_POOL_NEW_BLOCK_OPEN_READ_FILE_SIZE};
+  }
+
+  assert((result.stat.st_size % PAGE_SIZE) == 0);
+
+  size_t block = (result.stat.st_size / PAGE_SIZE) + 1;
+  if (linux_ftruncate(fd, PAGE_SIZE * block) != LINUX_FTRUNCATE_OK)
+  {
+    return (DiskBufferPoolNewBlockOpenResult){
+        .error = DISK_BUFFER_POOL_NEW_BLOCK_OPEN_RESIZE_FILE};
+  }
+
+  if (linux_seek(fd, PAGE_SIZE * block, LINUX_SEEK_SET) != LINUX_SEEK_OK)
+  {
+    assert(linux_close(fd) == LINUX_CLOSE_OK);
+    return (DiskBufferPoolNewBlockOpenResult){
+        .error = DISK_BUFFER_POOL_NEW_BLOCK_OPEN_SEEKING_FILE};
+  }
+
+  LinuxReadResult read_result = linux_read(fd, page, PAGE_SIZE);
+  if (read_result.error != LINUX_READ_OK)
+  {
+    assert(linux_close(fd) == LINUX_CLOSE_OK);
+    return (DiskBufferPoolNewBlockOpenResult){
+        .error = DISK_BUFFER_POOL_NEW_BLOCK_OPEN_READING_FILE};
+  }
+
+  assert(read_result.count == PAGE_SIZE);
+
+  pool->buffers[free_buffer_result.index] = (MappedBuffer){
+      .status = MAPPED_BUFFER_STATUS_USED,
+      .fd = fd,
+      .relation_id = id,
+      .block = block,
+      .page = page,
+  };
+
+  return (DiskBufferPoolNewBlockOpenResult){
+      .buffer_index = free_buffer_result.index,
+      .error = DISK_BUFFER_POOL_NEW_BLOCK_OPEN_OK,
+  };
 }
 
-static void memory_store_delete_tuples(
-    MemoryStore *store,
+typedef enum
+{
+  DISK_BUFFER_POOL_SAVE_OK,
+  DISK_BUFFER_POOL_SAVE_SEEKING_FILE,
+  DISK_BUFFER_POOL_SAVE_WRITING_FILE,
+  DISK_BUFFER_POOL_SAVE_SYNC,
+} DiskBufferPoolSaveError;
+
+static DiskBufferPoolSaveError
+disk_buffer_pool_save(DiskBufferPool *pool, size_t buffer_index)
+{
+  MappedBuffer buffer = pool->buffers[buffer_index];
+  if (linux_seek(buffer.fd, PAGE_SIZE * buffer.block, SEEK_SET)
+      != LINUX_SEEK_OK)
+  {
+    return DISK_BUFFER_POOL_SAVE_SEEKING_FILE;
+  }
+
+  LinuxWriteResult write_result =
+      linux_write(buffer.fd, buffer.page, PAGE_SIZE);
+  if (write_result.error != LINUX_WRITE_OK)
+  {
+    return DISK_BUFFER_POOL_SAVE_WRITING_FILE;
+  }
+  assert(write_result.count == PAGE_SIZE);
+
+  if (linux_fdatasync(buffer.fd) != LINUX_FDATASYNC_OK)
+  {
+    return DISK_BUFFER_POOL_SAVE_SYNC;
+  }
+
+  return DISK_BUFFER_POOL_SAVE_OK;
+}
+
+typedef enum
+{
+  DISK_BUFFER_POOL_CREATE_RELATION_OK,
+  DISK_BUFFER_POOL_CREATE_RELATION_FAILED_TO_CREATE,
+  DISK_BUFFER_POOL_CREATE_RELATION_FAILED_TO_STAT,
+  DISK_BUFFER_POOL_CREATE_RELATION_ALREADY_EXISTS,
+  DISK_BUFFER_POOL_CREATE_RELATION_PROGRAM_ERROR,
+  DISK_BUFFER_POOL_CREATE_RELATION_FAILED_TO_WRITE,
+} DiskBufferPoolCreateRelationError;
+
+static DiskBufferPoolCreateRelationError disk_buffer_pool_create_relation(
+    DiskBufferPool *pool, RelationId id, bool32 expect_new)
+{
+  char path[LINUX_PATH_MAX] = {};
+  disk_buffer_pool_relation_id_to_path(pool, id, path, ARRAY_LENGTH(path));
+  LinuxOpenResult open_result = linux_open(
+      path, O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+  switch (open_result.error)
+  {
+  case LINUX_OPEN_OK:
+    break;
+
+  case LINUX_OPEN_ACCESS:
+  case LINUX_OPEN_BUSY:
+  case LINUX_OPEN_QUOTA:
+  case LINUX_OPEN_INTERRUPT:
+  case LINUX_OPEN_TOO_MANY_SYMBOLIC_LINKS:
+  case LINUX_OPEN_TOO_MANY_FD_OPEN:
+  case LINUX_OPEN_SYSTEM_OPEN_FILE_LIMIT:
+  case LINUX_OPEN_NO_DEVICE:
+  case LINUX_OPEN_NO_MEMORY:
+  case LINUX_OPEN_NO_SPACE_ON_DEVICE:
+  case LINUX_OPEN_NOT_DIRECTORY:
+  case LINUX_OPEN_NO_DEVICE_OR_ADDRESS:
+  case LINUX_OPEN_OPERATION_NOT_SUPPORTED:
+  case LINUX_OPEN_PERMISSIONS:
+  case LINUX_OPEN_READ_ONLY_FILESYSTEM:
+  case LINUX_OPEN_FILE_BUSY:
+  case LINUX_OPEN_WOULD_BLOCK:
+    return DISK_BUFFER_POOL_CREATE_RELATION_FAILED_TO_CREATE;
+
+  case LINUX_OPEN_ALREADY_EXISTS:
+    return DISK_BUFFER_POOL_CREATE_RELATION_ALREADY_EXISTS;
+
+  case LINUX_OPEN_PATH_SEG_FAULT:
+  case LINUX_OPEN_PATH_FILE_TOO_BIG:
+  case LINUX_OPEN_FLAGS_MISUSE:
+  case LINUX_OPEN_IS_DIRECTORY:
+  case LINUX_OPEN_PATH_TOO_LONG:
+  case LINUX_OPEN_NOT_FOUND:
+  case LINUX_OPEN_UNKNOWN:
+    return DISK_BUFFER_POOL_CREATE_RELATION_PROGRAM_ERROR;
+  }
+
+  if (!expect_new)
+  {
+    LinuxFStatResult result = linux_fstat(open_result.fd);
+    if (result.error != LINUX_FSTAT_OK)
+    {
+      linux_close(open_result.fd);
+      return DISK_BUFFER_POOL_CREATE_RELATION_FAILED_TO_STAT;
+    }
+
+    if (result.stat.st_size > 0)
+    {
+      linux_close(open_result.fd);
+      return DISK_BUFFER_POOL_CREATE_RELATION_OK;
+    }
+  }
+
+  RelationHeader header = (RelationHeader){
+      .allocated_records = 0,
+      .variable_data_start = PAGE_SIZE,
+  };
+
+  LinuxWriteResult write_result =
+      linux_write(open_result.fd, (void *)&header, PAGE_SIZE);
+  switch (write_result.error)
+  {
+  case LINUX_WRITE_OK:
+    assert(write_result.count == PAGE_SIZE);
+    break;
+
+  case LINUX_WRITE_WOULD_BLOCK:
+  case LINUX_WRITE_QUOTA:
+  case LINUX_WRITE_INTERRUPT:
+  case LINUX_WRITE_INVALID:
+  case LINUX_WRITE_IO:
+  case LINUX_WRITE_NO_SPACE:
+  case LINUX_WRITE_PERMISSIONS:
+  case LINUX_WRITE_PIPE_CLOSED:
+    linux_close(open_result.fd);
+    return DISK_BUFFER_POOL_CREATE_RELATION_FAILED_TO_WRITE;
+
+  case LINUX_WRITE_BAD_FD:
+  case LINUX_WRITE_BUFFER_SEG_FAULT:
+  case LINUX_WRITE_INVALID_PEER_ADDRESS:
+  case LINUX_WRITE_LENGTH_TOO_BIG:
+  case LINUX_WRITE_UNKNOWN:
+    linux_close(open_result.fd);
+    return DISK_BUFFER_POOL_CREATE_RELATION_PROGRAM_ERROR;
+  }
+
+  switch (linux_fdatasync(open_result.fd))
+  {
+  case LINUX_FDATASYNC_OK:
+    break;
+
+  case LINUX_FDATASYNC_BAD_FD:
+  case LINUX_FDATASYNC_FD_NO_SYNC_SUPPORT:
+  case LINUX_FDATASYNC_UNKNOWN:
+    linux_close(open_result.fd);
+    return DISK_BUFFER_POOL_CREATE_RELATION_PROGRAM_ERROR;
+
+  case LINUX_FDATASYNC_INTERRUPT:
+  case LINUX_FDATASYNC_IO:
+  case LINUX_FDATASYNC_NO_SPACE:
+  case LINUX_FDATASYNC_READ_ONLY_FILESYSTEM:
+  case LINUX_FDATASYNC_QUOTA:
+    linux_close(open_result.fd);
+    return DISK_BUFFER_POOL_CREATE_RELATION_FAILED_TO_WRITE;
+  }
+
+  switch (linux_close(open_result.fd))
+  {
+  case LINUX_CLOSE_OK:
+    return DISK_BUFFER_POOL_CREATE_RELATION_OK;
+
+  case LINUX_CLOSE_BAD_FD:
+    return DISK_BUFFER_POOL_CREATE_RELATION_PROGRAM_ERROR;
+
+  case LINUX_CLOSE_INTERRUPT:
+  case LINUX_CLOSE_IO:
+  case LINUX_CLOSE_QUOTA:
+  case LINUX_CLOSE_UNKNOWN:
+    return DISK_BUFFER_POOL_CREATE_RELATION_FAILED_TO_WRITE;
+  }
+}
+
+static void
+disk_buffer_pool_delete_relation(DiskBufferPool *pool, RelationId id)
+{
+  char path[LINUX_PATH_MAX] = {};
+  disk_buffer_pool_relation_id_to_path(pool, id, path, ARRAY_LENGTH(path));
+  LinuxUnlinkError error = linux_unlink(path);
+  // FIXME: Mark undeleted files to delete them later
+  assert(error == LINUX_UNLINK_OK);
+}
+
+typedef enum
+{
+  DISK_BUFFER_POOL_INSERT_TUPLE_OK,
+  DISK_BUFFER_POOL_INSERT_TUPLE_SAVING,
+  DISK_BUFFER_POOL_INSERT_TUPLE_OPENING_BUFFER,
+  DISK_BUFFER_POOL_INSERT_TUPLE_BUFFER_POOL_FULL,
+  DISK_BUFFER_POOL_INSERT_TUPLE_TUPLE_TOO_BIG,
+} DiskBufferPoolInsertTupleError;
+
+// TODO: This assumes that the column types do not change between inserts
+static DiskBufferPoolInsertTupleError disk_buffer_pool_insert_tuple(
+    DiskBufferPool *pool,
+    RelationId relation_id,
     const ColumnType *types,
-    int64_t length,
+    const ColumnValue *values,
+    ColumnsLength tuple_length)
+{
+  assert(pool != NULL);
+  assert(types != NULL);
+  assert(values != NULL);
+  assert(tuple_length > 0);
+
+  TupleSizes tuple_sizes =
+      tuple_column_fixed_and_variable_size(types, values, tuple_length);
+
+  const size_t required_space =
+      tuple_sizes.fixed_size + tuple_sizes.variable_size;
+
+  size_t buffer_index = 0;
+  enum
+  {
+    DISK_BUFFER_POOL_INSERT_TUPLE_STATUS_OK,
+    DISK_BUFFER_POOL_INSERT_TUPLE_STATUS_NEXT_BLOCK,
+    DISK_BUFFER_POOL_INSERT_TUPLE_STATUS_EXPAND_FILE,
+  } status = DISK_BUFFER_POOL_INSERT_TUPLE_STATUS_NEXT_BLOCK;
+
+  BlockIndex block = 0;
+  for (block = 0; status == DISK_BUFFER_POOL_INSERT_TUPLE_STATUS_NEXT_BLOCK;
+       ++block)
+  {
+    DiskBufferPoolOpenResult result =
+        disk_buffer_pool_open(pool, relation_id, block);
+
+    buffer_index = result.buffer_index;
+
+    switch (result.error)
+    {
+    case DISK_BUFFER_POOL_OPEN_OK:
+    {
+      if (required_space
+          <= mapped_buffer_free_space(pool->buffers[buffer_index], tuple_sizes))
+      {
+        status = DISK_BUFFER_POOL_INSERT_TUPLE_STATUS_OK;
+      }
+      else
+      {
+        disk_buffer_pool_close(pool, result.buffer_index);
+      }
+    }
+    break;
+
+    case DISK_BUFFER_POOL_OPEN_OPENING_FILE:
+    case DISK_BUFFER_POOL_OPEN_SEEKING_FILE:
+    case DISK_BUFFER_POOL_OPEN_READING_FILE:
+      status = DISK_BUFFER_POOL_INSERT_TUPLE_STATUS_NEXT_BLOCK;
+      continue;
+
+    case DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL:
+      status = DISK_BUFFER_POOL_INSERT_TUPLE_STATUS_EXPAND_FILE;
+      break;
+
+    case DISK_BUFFER_POOL_OPEN_BUFFER_POOL_FULL:
+      return DISK_BUFFER_POOL_INSERT_TUPLE_BUFFER_POOL_FULL;
+    }
+  }
+
+  switch (status)
+  {
+  case DISK_BUFFER_POOL_INSERT_TUPLE_STATUS_OK:
+    break;
+
+  case DISK_BUFFER_POOL_INSERT_TUPLE_STATUS_NEXT_BLOCK:
+    assert(false);
+    break;
+
+  case DISK_BUFFER_POOL_INSERT_TUPLE_STATUS_EXPAND_FILE:
+  {
+    DiskBufferPoolNewBlockOpenResult result =
+        disk_buffer_pool_new_block_open(pool, relation_id);
+
+    switch (result.error)
+    {
+    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_OK:
+      break;
+
+    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_BUFFER_POOL_FULL:
+      return DISK_BUFFER_POOL_INSERT_TUPLE_BUFFER_POOL_FULL;
+      break;
+
+    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_OPENING_FILE:
+    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_RESIZE_FILE:
+    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_READ_FILE_SIZE:
+    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_SEEKING_FILE:
+    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_READING_FILE:
+      return DISK_BUFFER_POOL_INSERT_TUPLE_OPENING_BUFFER;
+    }
+
+    buffer_index = result.buffer_index;
+
+    if (required_space
+        > mapped_buffer_free_space(pool->buffers[buffer_index], tuple_sizes))
+    {
+      disk_buffer_pool_close(pool, result.buffer_index);
+      return DISK_BUFFER_POOL_INSERT_TUPLE_TUPLE_TOO_BIG;
+    }
+  }
+  break;
+  }
+
+  RelationHeader *header = mapped_buffer_header(pool->buffers[buffer_index]);
+  void *tuple_memory =
+      mapped_buffer_free_tuple(pool->buffers[buffer_index], tuple_sizes);
+
+  for (ColumnsLength column = 0; column < tuple_length; ++column)
+  {
+    const size_t column_byte_offset =
+        tuple_column_fixed_byte_offset(types, tuple_length, column);
+
+    StoredValue *field = tuple_memory + column_byte_offset;
+
+    switch (types[column])
+    {
+
+    case COLUMN_TYPE_INTEGER:
+    {
+      field->integer = values[column].integer;
+    }
+    break;
+
+    case COLUMN_TYPE_STRING:
+    {
+      const u_int16_t MAX_UINT_16 = 0xFFFF;
+      size_t field_variable_size =
+          column_type_variable_size(types[column], values[column]);
+      assert(field_variable_size <= MAX_UINT_16);
+
+      header->variable_data_start -= (int16_t)field_variable_size;
+
+      memory_copy_forward(
+          &pool->buffers[buffer_index].page[header->variable_data_start],
+          values[column].string.data,
+          field_variable_size);
+
+      field->string = (StoreString){
+          .length = (int16_t)field_variable_size,
+          .offset = header->variable_data_start,
+      };
+    }
+    break;
+    }
+  }
+
+  header->allocated_records += 1;
+
+  assert(
+      tuple_sizes.fixed_size * header->allocated_records
+      <= header->variable_data_start);
+
+  DiskBufferPoolSaveError save_error =
+      disk_buffer_pool_save(pool, buffer_index);
+
+  disk_buffer_pool_close(pool, buffer_index);
+
+  switch (save_error)
+  {
+  case DISK_BUFFER_POOL_SAVE_OK:
+    return DISK_BUFFER_POOL_INSERT_TUPLE_OK;
+
+  case DISK_BUFFER_POOL_SAVE_SEEKING_FILE:
+  case DISK_BUFFER_POOL_SAVE_WRITING_FILE:
+  case DISK_BUFFER_POOL_SAVE_SYNC:
+    return DISK_BUFFER_POOL_INSERT_TUPLE_SAVING;
+  }
+}
+
+static void disk_buffer_pool_delete_tuples(
+    DiskBufferPool *pool,
+    RelationId relation_id,
+    const ColumnType *types,
+    ColumnsLength tuple_length,
     ColumnsLength column_index,
     ColumnValue value)
 {
-  assert(store != NULL);
+  assert(pool != NULL);
   assert(types != NULL);
-  assert(length > 0);
-  assert(column_index < length);
+  assert(tuple_length > 0);
+  assert(column_index < tuple_length);
 
-  size_t fixed_size = tuple_column_fixed_size(types, length);
+  size_t fixed_size = tuple_column_fixed_size(types, tuple_length);
 
   const size_t column_byte_offset =
-      tuple_column_fixed_byte_offset(types, length, column_index);
+      tuple_column_fixed_byte_offset(types, tuple_length, column_index);
 
-  for (size_t i = 0; i < store->blocks; ++i)
+  for (BlockIndex block = 0;; ++block)
   {
-    Block block = memory_store_block(store, i);
-
-    size_t block_variable_data_removed = 0;
-
-    for (size_t tuple = 0; tuple < block.header->allocated_records;)
+    DiskBufferPoolOpenResult result =
+        disk_buffer_pool_open(pool, relation_id, block);
+    // Can't use break to break out of the loop from inside the swtich, so we
+    // handle this separately
+    if (result.error == DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL)
     {
-      void *tuple_memory = memory_store_tuple(block, fixed_size, tuple);
+      break;
+    }
+
+    switch (result.error)
+    {
+    case DISK_BUFFER_POOL_OPEN_OK:
+      break;
+
+    case DISK_BUFFER_POOL_OPEN_OPENING_FILE:
+    case DISK_BUFFER_POOL_OPEN_SEEKING_FILE:
+    case DISK_BUFFER_POOL_OPEN_READING_FILE:
+    case DISK_BUFFER_POOL_OPEN_BUFFER_POOL_FULL:
+      // FIXME: Use transactions to handle failure
+      continue;
+
+    case DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL:
+      assert(false);
+      break;
+    }
+
+    MappedBuffer *buffer = &pool->buffers[result.buffer_index];
+    RelationHeader *header = mapped_buffer_header(*buffer);
+
+    int16_t block_variable_data_removed = 0;
+
+    for (size_t tuple_index = 0; tuple_index < header->allocated_records;)
+    {
+      void *tuple_memory =
+          mapped_buffer_tuple(*buffer, fixed_size, tuple_index);
 
       bool32 delete = false;
 
-      StoredValue *field = &tuple_memory[column_byte_offset];
+      StoredValue *field = tuple_memory + column_byte_offset;
       switch (types[column_index])
       {
       case COLUMN_TYPE_INTEGER:
@@ -326,7 +899,7 @@ static void memory_store_delete_tuples(
       {
         StringSlice slice = (StringSlice){
             .length = field->string.length,
-            .data = &block.memory[field->string.offset],
+            .data = &buffer->page[field->string.offset],
         };
         delete = string_slice_eq(slice, value.string);
       }
@@ -335,11 +908,11 @@ static void memory_store_delete_tuples(
 
       int16_t block_variable_data_end = 0;
       int16_t block_variable_data_start = 0;
-      for (size_t column = 0; column < length; ++column)
+      for (ColumnsLength column = 0; column < tuple_length; ++column)
       {
         const size_t column_byte_offset =
-            tuple_column_fixed_byte_offset(types, length, column);
-        StoredValue *field = &tuple_memory[column_byte_offset];
+            tuple_column_fixed_byte_offset(types, tuple_length, column);
+        StoredValue *field = tuple_memory + column_byte_offset;
 
         switch (types[column])
         {
@@ -373,106 +946,191 @@ static void memory_store_delete_tuples(
         memory_copy_forward(
             tuple_memory,
             tuple_memory + fixed_size,
-            fixed_size * (block.header->allocated_records - (tuple + 1)));
+            fixed_size * (header->allocated_records - (tuple_index + 1)));
 
         if (block_variable_data_end != 0)
         {
           size_t variable_data_remaining =
-              block_variable_data_start - block.header->variable_data_start;
+              block_variable_data_start - header->variable_data_start;
 
           memory_copy_backward(
-              &block.memory[block_variable_data_end - 1],
-              &block.memory[block_variable_data_start - 1],
+              &buffer->page[block_variable_data_end - 1],
+              &buffer->page[block_variable_data_start - 1],
               variable_data_remaining);
 
-          size_t variable_data_removed =
+          int16_t variable_data_removed =
               block_variable_data_end - block_variable_data_start;
           block_variable_data_removed += variable_data_removed;
-          block.header->variable_data_start += variable_data_removed;
+          header->variable_data_start += variable_data_removed;
         }
 
-        block.header->allocated_records -= 1;
+        header->allocated_records -= 1;
       }
       else
       {
-        tuple++;
+        tuple_index++;
       }
     }
   }
 }
 
+typedef enum
+{
+  DISK_TUPLE_ITERATOR_STATUS_OK,
+  DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES,
+  DISK_TUPLE_ITERATOR_STATUS_ERROR,
+} DiskTupleIteratorStatus;
+
 typedef struct
 {
-  MemoryStore *store;
-  size_t block_index;
+  DiskBufferPool *pool;
+  size_t buffer_index;
   size_t tuple_index;
-  bool32 valid;
-} BlockTupleIterator;
+  DiskTupleIteratorStatus status;
+} DiskTupleIterator;
 
-static BlockTupleIterator memory_store_iterate(MemoryStore *store)
+typedef enum
 {
-  assert(store != NULL);
+  DISK_BUFFER_LOAD_NEXT_PAGE_OK,
+  DISK_BUFFER_LOAD_NEXT_PAGE_NO_MORE_TUPLES,
+  DISK_BUFFER_LOAD_NEXT_PAGE_LOADING_PAGE,
+} DiskBufferLoadNextPageError;
 
-  for (size_t i = 0; i < store->blocks; ++i)
+typedef struct
+{
+  BlockIndex block;
+  size_t buffer_index;
+  DiskBufferLoadNextPageError error;
+} DiskBufferLoadNextPageResult;
+
+static DiskBufferLoadNextPageResult disk_buffer_pool_iterator_load_next_page(
+    DiskBufferPool *pool, RelationId id, BlockIndex block)
+{
+  for (;; ++block)
   {
-    Block block = memory_store_block(store, i);
-    if (block.header->allocated_records > 0)
+    DiskBufferPoolOpenResult result = disk_buffer_pool_open(pool, id, block);
+    switch (result.error)
     {
-      return (BlockTupleIterator){
-          .store = store,
-          .block_index = i,
-          .tuple_index = 0,
-          .valid = true,
-      };
+    case DISK_BUFFER_POOL_OPEN_OK:
+      if (mapped_buffer_header(pool->buffers[result.buffer_index])
+              ->allocated_records
+          > 0)
+      {
+        return (DiskBufferLoadNextPageResult){
+            .error = DISK_BUFFER_LOAD_NEXT_PAGE_OK,
+            .block = block,
+            .buffer_index = result.buffer_index,
+        };
+      }
+      disk_buffer_pool_close(pool, result.buffer_index);
+      break;
+
+    case DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL:
+      return (DiskBufferLoadNextPageResult){
+          .error = DISK_BUFFER_LOAD_NEXT_PAGE_NO_MORE_TUPLES};
+
+    case DISK_BUFFER_POOL_OPEN_OPENING_FILE:
+    case DISK_BUFFER_POOL_OPEN_SEEKING_FILE:
+    case DISK_BUFFER_POOL_OPEN_READING_FILE:
+    case DISK_BUFFER_POOL_OPEN_BUFFER_POOL_FULL:
+      return (DiskBufferLoadNextPageResult){
+          .error = DISK_BUFFER_LOAD_NEXT_PAGE_LOADING_PAGE};
     }
   }
-
-  return (BlockTupleIterator){
-      .store = store,
-      .block_index = 0,
-      .tuple_index = 0,
-      .valid = false,
-  };
 }
 
-static void block_tuple_iterator_next(BlockTupleIterator *it)
+static DiskTupleIterator
+disk_buffer_pool_iterate(DiskBufferPool *pool, RelationId id)
+{
+  assert(pool != NULL);
+
+  DiskBufferLoadNextPageResult result =
+      disk_buffer_pool_iterator_load_next_page(pool, id, 0);
+  switch (result.error)
+  {
+  case DISK_BUFFER_LOAD_NEXT_PAGE_OK:
+    return (DiskTupleIterator){
+        .pool = pool,
+        .buffer_index = result.buffer_index,
+        .tuple_index = 0,
+        .status = DISK_TUPLE_ITERATOR_STATUS_OK,
+    };
+
+  case DISK_BUFFER_LOAD_NEXT_PAGE_NO_MORE_TUPLES:
+    return (DiskTupleIterator){
+        .pool = pool,
+        .buffer_index = {},
+        .tuple_index = 0,
+        .status = DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES,
+    };
+
+  case DISK_BUFFER_LOAD_NEXT_PAGE_LOADING_PAGE:
+    return (DiskTupleIterator){
+        .pool = pool,
+        .buffer_index = {},
+        .tuple_index = 0,
+        .status = DISK_TUPLE_ITERATOR_STATUS_ERROR,
+    };
+  }
+}
+
+static void disk_tuple_iterator_next(DiskTupleIterator *it)
 {
   assert(it != NULL);
 
-  for (; it->block_index < it->store->blocks;
-       ++it->block_index, it->tuple_index = 0)
-  {
-    it->tuple_index += 1;
+  MappedBuffer buffer = it->pool->buffers[it->buffer_index];
 
-    Block block = memory_store_block(it->store, it->block_index);
-    if (it->tuple_index < block.header->allocated_records)
-    {
-      return;
-    }
+  it->tuple_index += 1;
+  if (it->tuple_index < mapped_buffer_header(buffer)->allocated_records)
+  {
+    return;
   }
 
-  it->valid = false;
+  DiskBufferLoadNextPageResult result =
+      disk_buffer_pool_iterator_load_next_page(
+          it->pool, buffer.relation_id, buffer.block + 1);
+
+  switch (result.error)
+  {
+  case DISK_BUFFER_LOAD_NEXT_PAGE_OK:
+    disk_buffer_pool_close(it->pool, it->buffer_index);
+    *it = (DiskTupleIterator){
+        .pool = it->pool,
+        .buffer_index = result.buffer_index,
+        .tuple_index = 0,
+        .status = DISK_TUPLE_ITERATOR_STATUS_OK,
+    };
+    break;
+
+  case DISK_BUFFER_LOAD_NEXT_PAGE_NO_MORE_TUPLES:
+    it->status = DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES;
+    break;
+
+  case DISK_BUFFER_LOAD_NEXT_PAGE_LOADING_PAGE:
+    it->status = DISK_TUPLE_ITERATOR_STATUS_ERROR;
+    break;
+  }
 }
 
-static ColumnValue block_tuple_iterator_get(
-    BlockTupleIterator *it,
+static ColumnValue disk_tuple_iterator_get(
+    DiskTupleIterator *it,
     const ColumnType *types,
-    int64_t length,
-    int16_t column_index)
+    ColumnsLength tuple_length,
+    ColumnsLength column_index)
 {
   assert(it != NULL);
   assert(types != NULL);
-  assert(length > 0);
-  assert(column_index < length);
+  assert(tuple_length > 0);
+  assert(column_index < tuple_length);
 
-  size_t fixed_size = tuple_column_fixed_size(types, length);
-
-  Block block = memory_store_block(it->store, it->block_index);
-  void *tuple_memory = memory_store_tuple(block, fixed_size, it->tuple_index);
+  MappedBuffer *buffer = &it->pool->buffers[it->buffer_index];
+  size_t fixed_size = tuple_column_fixed_size(types, tuple_length);
+  void *tuple_memory =
+      mapped_buffer_tuple(*buffer, fixed_size, it->tuple_index);
 
   const size_t column_byte_offset =
-      tuple_column_fixed_byte_offset(types, length, column_index);
-  StoredValue *field = &tuple_memory[column_byte_offset];
+      tuple_column_fixed_byte_offset(types, tuple_length, column_index);
+  StoredValue *field = tuple_memory + column_byte_offset;
 
   switch (types[column_index])
   {
@@ -488,13 +1146,20 @@ static ColumnValue block_tuple_iterator_get(
         .string =
             (StringSlice){
                 .length = field->string.length,
-                .data = &block.memory[field->string.offset],
+                .data = &buffer->page[field->string.offset],
             },
     };
   }
   break;
   }
 }
+
+void disk_tuple_iterator_close(DiskTupleIterator *it)
+{
+  disk_buffer_pool_close(it->pool, it->buffer_index);
+}
+
+// ----- Disk buffer pool -----
 
 #define PHYSICAL_H
 #endif

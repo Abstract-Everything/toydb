@@ -10,8 +10,8 @@ The goal of this project is not to even reach close to feature parity with a pro
 - \[x\] Row stores in RAM buffer
 - \[ \] Column stores in RAM buffer
 - \[ \] Index structures in RAM buffer
-- \[ \] Persist buffers to disk
-- \[ \] Buffer manager to manage pages of disk in RAM
+- \[x\] Persist buffers to disk
+- \[x\] Buffer manager to manage pages of disk in RAM
 
 ### Supported data types
 

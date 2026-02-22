@@ -53,6 +53,7 @@ static AllocateError allocate(void **memory, size_t length)
 
 static void deallocate(void *memory, size_t length)
 {
+  UNUSED(length);
   if (memory == NULL)
   {
     return;
@@ -242,6 +243,26 @@ static bool32 string_slice_eq(StringSlice a, StringSlice b)
   for (; i < a.length && a.data[i] == b.data[i]; ++i) {}
 
   return i == a.length;
+}
+
+static size_t string_slice_concat(
+    char *into,
+    size_t index,
+    size_t length,
+    StringSlice a,
+    bool32 insert_null_terminator)
+{
+  const size_t last_index = index + a.length + (insert_null_terminator ? 1 : 0);
+  assert(last_index < length);
+
+  memory_copy_forward(into + index, a.data, a.length);
+
+  if (insert_null_terminator)
+  {
+    into[index + a.length] = '\0';
+  }
+
+  return last_index;
 }
 
 #define STD_H

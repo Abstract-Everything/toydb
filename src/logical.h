@@ -5,6 +5,10 @@
 
 #define RELATION_NAME_QUALIFIER '.'
 
+#define RELATIONS_RELATION_ID 0
+#define RELATION_COLUMNS_RELATION_ID 1
+#define RESERVED_RELATION_IDS 1024
+
 // ---------- Schema types ----------
 
 const char *const relations_relation_name = "relations";
@@ -47,101 +51,83 @@ STATIC_ASSERT(
 
 typedef struct
 {
-  int64_t relation_id;
-  MemoryStore store;
-} UserRelationData;
+  DiskBufferPool pool;
+} Database;
+
+static DiskBufferPoolCreateRelationError
+database_new(Database *db, StringSlice path, void *data, size_t length)
+{
+  assert(db != NULL);
+  assert(data != NULL);
+  size_t buffers_length = length / (PAGE_SIZE + sizeof(MappedBuffer));
+  assert(length == buffers_length * (PAGE_SIZE + sizeof(MappedBuffer)));
+
+  *db = (Database){
+      .pool =
+          {
+              .save_path = {},
+              .buffers_length = buffers_length,
+              .buffers = data,
+              .buffer_pages = data + (buffers_length * sizeof(MappedBuffer)),
+          },
+  };
+
+  memory_copy_forward(db->pool.save_path_buffer, path.data, path.length);
+
+  db->pool.save_path = (StringSlice){
+      .data = db->pool.save_path_buffer,
+      .length = path.length,
+  };
+
+  for (size_t i = 0; i < db->pool.buffers_length; ++i)
+  {
+    db->pool.buffers[i] = (MappedBuffer){.status = MAPPED_BUFFER_STATUS_FREE};
+  }
+
+  DiskBufferPoolCreateRelationError error =
+      disk_buffer_pool_create_relation(&db->pool, RELATIONS_RELATION_ID, false);
+  if (error != DISK_BUFFER_POOL_CREATE_RELATION_OK)
+  {
+    return error;
+  }
+
+  return disk_buffer_pool_create_relation(
+      &db->pool, RELATION_COLUMNS_RELATION_ID, false);
+}
 
 typedef struct
 {
-  // TODO: Switch to permanent storage
-  MemoryStore relations;
-  MemoryStore relation_columns;
-  size_t blocks_per_user_relations;
-  size_t user_relations_length;
-  UserRelationData *user_relations;
-} Database;
+  RelationId relation_id;
+  DiskTupleIteratorStatus status;
+} QueryRelationIdByNameResult;
 
-static void database_destroy(Database *db)
+static QueryRelationIdByNameResult
+query_relation_id_by_name(Database db, StringSlice name)
 {
-  assert(db != NULL);
-
-  for (size_t i = 0; i < db->user_relations_length; ++i)
+  DiskTupleIterator i;
+  for (i = disk_buffer_pool_iterate(&db.pool, RELATIONS_RELATION_ID);
+       i.status == DISK_TUPLE_ITERATOR_STATUS_OK;
+       disk_tuple_iterator_next(&i))
   {
-    memory_store_destroy(&db->user_relations[i].store);
-  }
-  deallocate(
-      db->user_relations,
-      sizeof(db->user_relations[0]) * db->user_relations_length);
-
-  memory_store_destroy(&db->relations);
-  memory_store_destroy(&db->relation_columns);
-}
-
-static AllocateError database_new(
-    Database *db,
-    size_t relations_blocks,
-    size_t relation_columns_blocks,
-    size_t data_blocks)
-{
-  assert(db != NULL);
-  assert(relations_blocks > 0);
-  assert(relation_columns_blocks > 0);
-  assert(data_blocks > 0);
-
-  *db = (Database){
-      .relations = {},
-      .relation_columns = {},
-      .blocks_per_user_relations = data_blocks,
-      .user_relations_length = 0,
-      .user_relations = NULL,
-  };
-
-  if (memory_store_new(&db->relations, relations_blocks)
-          == ALLOCATE_OUT_OF_MEMORY
-      || memory_store_new(&db->relation_columns, relations_blocks)
-             == ALLOCATE_OUT_OF_MEMORY)
-  {
-    database_destroy(db);
-    return ALLOCATE_OUT_OF_MEMORY;
-  }
-
-  return ALLOCATE_OK;
-}
-
-static bool32
-query_relation_id_by_name(Database db, StringSlice name, int64_t *id)
-{
-  for (BlockTupleIterator i = memory_store_iterate(&db.relations); i.valid;
-       block_tuple_iterator_next(&i))
-  {
-    ColumnValue tuple_name = block_tuple_iterator_get(
+    ColumnValue tuple_name = disk_tuple_iterator_get(
         &i, relations_column_types, ARRAY_LENGTH(relations_column_types), 1);
     if (string_slice_eq(name, tuple_name.string))
     {
-      ColumnValue tuple_id = block_tuple_iterator_get(
+      ColumnValue tuple_id = disk_tuple_iterator_get(
           &i, relations_column_types, ARRAY_LENGTH(relations_column_types), 0);
 
-      *id = tuple_id.integer;
-      return true;
+      disk_tuple_iterator_close(&i);
+      return (QueryRelationIdByNameResult){
+          .status = DISK_TUPLE_ITERATOR_STATUS_OK,
+          .relation_id = tuple_id.integer,
+      };
     }
   }
-  return false;
-}
+  disk_tuple_iterator_close(&i);
 
-static size_t find_user_relation_index(Database db, int64_t id)
-{
-  for (size_t i = 0; i < db.user_relations_length; ++i)
-  {
-    if (db.user_relations[i].relation_id == id)
-    {
-      return i;
-    }
-  }
-
-  // Given the query found the relation in the relations table (that's how we
-  // get the id parameter), there should always exist a store for it
-  assert(false);
-  return 0;
+  return (QueryRelationIdByNameResult){
+      .status = i.status,
+  };
 }
 
 typedef enum
@@ -149,6 +135,9 @@ typedef enum
   DATABASE_CREATE_TABLE_OK,
   DATABASE_CREATE_TABLE_OUT_OF_MEMORY,
   DATABASE_CREATE_TABLE_NO_SPACE,
+  DATABASE_CREATE_TABLE_READING_DISK,
+  DATABASE_CREATE_TABLE_CREATING_FILE,
+  DATABASE_CREATE_TABLE_REALTION_ALREADY_EXISTS,
 } DatabaseCreateTableError;
 
 // TODO: Check that column names are unique
@@ -165,44 +154,66 @@ static DatabaseCreateTableError database_create_table(
   assert(types != NULL);
   assert(length > 0);
 
-  int64_t relation_id = 0;
-  for (BlockTupleIterator i = memory_store_iterate(&db->relations); i.valid;
-       block_tuple_iterator_next(&i))
+  int64_t relation_id = RESERVED_RELATION_IDS;
   {
-    ColumnValue value = block_tuple_iterator_get(
-        &i, relations_column_types, ARRAY_LENGTH(relations_column_types), 0);
-
-    if (relation_id <= value.integer)
+    DiskTupleIterator i;
+    bool32 exists = false;
+    for (i = disk_buffer_pool_iterate(&db->pool, RELATIONS_RELATION_ID);
+         i.status == DISK_TUPLE_ITERATOR_STATUS_OK;
+         disk_tuple_iterator_next(&i))
     {
-      relation_id = value.integer + 1;
+      ColumnValue tuple_id = disk_tuple_iterator_get(
+          &i, relations_column_types, ARRAY_LENGTH(relations_column_types), 0);
+
+      if (relation_id <= tuple_id.integer)
+      {
+        relation_id = tuple_id.integer + 1;
+      }
+
+      ColumnValue tuple_name = disk_tuple_iterator_get(
+          &i, relations_column_types, ARRAY_LENGTH(relations_column_types), 1);
+
+      if (string_slice_eq(name, tuple_name.string))
+      {
+        exists = true;
+        break;
+      }
+    }
+
+    disk_tuple_iterator_close(&i);
+
+    if (exists)
+    {
+      return DATABASE_CREATE_TABLE_REALTION_ALREADY_EXISTS;
+    }
+
+    switch (i.status)
+    {
+    case DISK_TUPLE_ITERATOR_STATUS_OK:
+      assert(false);
+      break;
+
+    case DISK_TUPLE_ITERATOR_STATUS_ERROR:
+      return DATABASE_CREATE_TABLE_READING_DISK;
+
+    case DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES:
+      break;
     }
   }
 
-  UserRelationData relation_data = {
-      .relation_id = relation_id,
-      .store = {},
-  };
-  if (memory_store_new(&relation_data.store, db->blocks_per_user_relations)
-      == ALLOCATE_OUT_OF_MEMORY)
+  assert(relation_id >= RESERVED_RELATION_IDS);
+
+  DiskBufferPoolCreateRelationError error =
+      disk_buffer_pool_create_relation(&db->pool, relation_id, true);
+  if (error != DISK_BUFFER_POOL_CREATE_RELATION_OK)
   {
-    return DATABASE_CREATE_TABLE_OUT_OF_MEMORY;
+    return DATABASE_CREATE_TABLE_CREATING_FILE;
   }
 
-  // TODO: Implement dynamic array
-  if (reallocate_update_length(
-          sizeof(db->user_relations[0]),
-          (void **)&db->user_relations,
-          &db->user_relations_length,
-          db->user_relations_length + 1)
-      == ALLOCATE_OUT_OF_MEMORY)
-  {
-    return DATABASE_CREATE_TABLE_OUT_OF_MEMORY;
-  }
-  db->user_relations[db->user_relations_length - 1] = relation_data;
-
-  MemoryStoreInsertTupleError insert_error = MEMORY_STORE_INSERT_TUPLE_OK;
+  DiskBufferPoolInsertTupleError insert_error =
+      DISK_BUFFER_POOL_INSERT_TUPLE_OK;
   for (int16_t column = 0;
-       column < length && insert_error == MEMORY_STORE_INSERT_TUPLE_OK;
+       column < length && insert_error == DISK_BUFFER_POOL_INSERT_TUPLE_OK;
        ++column)
   {
     ColumnValue relation_column_values[] = {
@@ -215,14 +226,15 @@ static DatabaseCreateTableError database_create_table(
         ARRAY_LENGTH(relation_column_values)
         == ARRAY_LENGTH(relation_columns_column_types));
 
-    insert_error = memory_store_insert_tuple(
-        &db->relation_columns,
+    insert_error = disk_buffer_pool_insert_tuple(
+        &db->pool,
+        RELATION_COLUMNS_RELATION_ID,
         relation_columns_column_types,
         relation_column_values,
         ARRAY_LENGTH(relation_column_values));
   }
 
-  if (insert_error == MEMORY_STORE_INSERT_TUPLE_OK)
+  if (insert_error == DISK_BUFFER_POOL_INSERT_TUPLE_OK)
   {
     ColumnValue relations_values[] = {
         {.integer = relation_id},
@@ -231,43 +243,31 @@ static DatabaseCreateTableError database_create_table(
     STATIC_ASSERT(
         ARRAY_LENGTH(relations_values) == ARRAY_LENGTH(relations_column_types));
 
-    insert_error = memory_store_insert_tuple(
-        &db->relations,
+    insert_error = disk_buffer_pool_insert_tuple(
+        &db->pool,
+        RELATIONS_RELATION_ID,
         relations_column_types,
         relations_values,
         ARRAY_LENGTH(relations_values));
   }
 
-  if (insert_error != MEMORY_STORE_INSERT_TUPLE_OK)
+  if (insert_error != DISK_BUFFER_POOL_INSERT_TUPLE_OK)
   {
-    memory_store_delete_tuples(
-        &db->relation_columns,
+    disk_buffer_pool_delete_tuples(
+        &db->pool,
+        RELATION_COLUMNS_RELATION_ID,
         relation_columns_column_types,
         ARRAY_LENGTH(relation_columns_column_types),
         0,
         (ColumnValue){.integer = relation_id});
 
-    memory_store_delete_tuples(
-        &db->relation_columns,
+    disk_buffer_pool_delete_tuples(
+        &db->pool,
+        RELATIONS_RELATION_ID,
         relations_column_types,
         ARRAY_LENGTH(relations_column_types),
         0,
         (ColumnValue){.integer = relation_id});
-
-    memory_store_destroy(
-        &db->user_relations[db->user_relations_length - 1].store);
-    db->user_relations[db->user_relations_length - 1].relation_id = -1;
-
-    // TODO: Implement dynamic array
-    if (reallocate_update_length(
-            sizeof(db->user_relations[0]),
-            (void **)&db->user_relations,
-            &db->user_relations_length,
-            db->user_relations_length - 1)
-        == ALLOCATE_OUT_OF_MEMORY)
-    {
-      return DATABASE_CREATE_TABLE_OUT_OF_MEMORY;
-    }
 
     return DATABASE_CREATE_TABLE_NO_SPACE;
   }
@@ -280,6 +280,7 @@ typedef enum
   DATABASE_DROP_TABLE_OK,
   DATABASE_DROP_TABLE_OUT_OF_MEMORY,
   DATABASE_DROP_TABLE_NOT_FOUND,
+  DATABASE_DROP_TABLE_READING_DISK,
 } DatabaseDropTableError;
 
 static DatabaseDropTableError
@@ -288,46 +289,34 @@ database_drop_table(Database *db, StringSlice name)
   assert(db != NULL);
   assert(name.length > 0);
 
-  int64_t relation_id = 0;
-  if (!query_relation_id_by_name(*db, name, &relation_id))
+  QueryRelationIdByNameResult result = query_relation_id_by_name(*db, name);
+  switch (result.status)
   {
+  case DISK_TUPLE_ITERATOR_STATUS_OK:
+    break;
+
+  case DISK_TUPLE_ITERATOR_STATUS_ERROR:
+    return DATABASE_DROP_TABLE_READING_DISK;
+
+  case DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES:
     return DATABASE_DROP_TABLE_NOT_FOUND;
   }
 
-  size_t relation_index = find_user_relation_index(*db, relation_id);
-  if (relation_index != db->user_relations_length - 1)
-  {
-    size_t last_index = db->user_relations_length - 1;
-    UserRelationData temp = db->user_relations[relation_index];
-    db->user_relations[relation_index] = db->user_relations[last_index];
-    db->user_relations[last_index] = temp;
-  }
-
-  // Remove the last element, the previous for loop should make sure that the
-  // relation to be removed is always last
-  if (reallocate_update_length(
-          sizeof(db->user_relations[0]),
-          (void **)&db->user_relations,
-          &db->user_relations_length,
-          db->user_relations_length - 1)
-      == ALLOCATE_OUT_OF_MEMORY)
-  {
-    return DATABASE_DROP_TABLE_OUT_OF_MEMORY;
-  }
-
-  memory_store_delete_tuples(
-      &db->relation_columns,
+  disk_buffer_pool_delete_tuples(
+      &db->pool,
+      RELATION_COLUMNS_RELATION_ID,
       relation_columns_column_types,
       ARRAY_LENGTH(relation_columns_column_types),
       0,
-      (ColumnValue){.integer = relation_id});
+      (ColumnValue){.integer = result.relation_id});
 
-  memory_store_delete_tuples(
-      &db->relations,
+  disk_buffer_pool_delete_tuples(
+      &db->pool,
+      RELATIONS_RELATION_ID,
       relations_column_types,
       ARRAY_LENGTH(relations_column_types),
       0,
-      (ColumnValue){.integer = relation_id});
+      (ColumnValue){.integer = result.relation_id});
 
   return DATABASE_DROP_TABLE_OK;
 }
@@ -348,272 +337,276 @@ static AllocateError allocate_column_table_name(
   return string_append(string, column_name);
 }
 
-static AllocateError database_get_static_relation_column_metadata(
-    StringSlice relation_name,
-    ColumnsLength tuple_length,
-    const char *const *relation_names,
-    const ColumnType *relation_types,
-    ColumnType **types,
-    String **names)
-{
-  AllocateError status =
-      allocate((void **)types, sizeof(**types) * tuple_length);
-  if (status == ALLOCATE_OK && names != NULL)
-  {
-    status = allocate((void **)names, sizeof(**names) * tuple_length);
-  }
-
-  size_t column_index = 0;
-  for (; column_index < tuple_length && status == ALLOCATE_OK; ++column_index)
-  {
-    (*types)[column_index] = relation_types[column_index];
-
-    if (names != NULL)
-    {
-      String *string = &(*names)[column_index];
-      status = allocate_column_table_name(
-          &(*names)[column_index],
-          relation_name,
-          string_slice_from_ptr(relation_names[column_index]));
-    }
-  }
-
-  if (status != ALLOCATE_OK)
-  {
-    for (size_t i = 0; i < column_index; ++i) { string_destroy(&(*names)[i]); }
-    deallocate(*types, sizeof(**types) * tuple_length);
-    if (names != NULL)
-    {
-      deallocate(*names, sizeof(**names) * tuple_length);
-    }
-    return ALLOCATE_OUT_OF_MEMORY;
-  }
-
-  return ALLOCATE_OK;
-}
-
 typedef enum
 {
   DATABASE_GET_RELATION_COLUMN_METADATA_OK,
   DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY,
   DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND,
+  DATABASE_GET_RELATION_COLUMN_METADATA_READING_DISK,
 } DatabaseGetRelationColumnMetadataError;
 
-static DatabaseGetRelationColumnMetadataError
-database_get_relation_column_metadata_(
-    Database *db,
-    StringSlice relation_name,
-    bool32 *is_internal,
-    MemoryStore **store,
-    ColumnsLength *tuple_length_,
-    ColumnType **types,
-    String **names)
+typedef struct
 {
-  assert(db != NULL);
-  assert(is_internal != NULL);
-  assert(store != NULL);
-  assert(*store == NULL);
-  assert(tuple_length_ != NULL);
-  assert(*tuple_length_ == 0);
-  assert(types != NULL);
+  ColumnsLength tuple_length;
+  RelationId relation_id;
+  ColumnType *types;
+  String *names;
+  DatabaseGetRelationColumnMetadataError error;
+} DatabaseGetRelationColumnMetadataResult;
+
+static DatabaseGetRelationColumnMetadataResult
+database_get_static_relation_column_metadata(
+    StringSlice relation_name, bool32 write_names)
+{
+  RelationId relation_id = 0;
+  size_t tuple_length = 0;
+  const char *const *column_names = NULL;
+  const ColumnType *column_types = NULL;
 
   if (string_slice_eq(
           relation_name, string_slice_from_ptr(relations_relation_name)))
   {
-    ColumnsLength tuple_length = ARRAY_LENGTH(relations_column_types);
-
-    if (database_get_static_relation_column_metadata(
-            relation_name,
-            tuple_length,
-            relations_column_names,
-            relations_column_types,
-            types,
-            names)
-        != ALLOCATE_OK)
-    {
-      return DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY;
-    }
-
-    *tuple_length_ = tuple_length;
-    *store = &db->relations;
-    *is_internal = true;
-    return DATABASE_GET_RELATION_COLUMN_METADATA_OK;
+    relation_id = RELATIONS_RELATION_ID;
+    tuple_length = ARRAY_LENGTH(relations_column_types);
+    column_names = relations_column_names;
+    column_types = relations_column_types;
+  }
+  else if (string_slice_eq(
+               relation_name,
+               string_slice_from_ptr(relation_columns_relation_name)))
+  {
+    relation_id = RELATION_COLUMNS_RELATION_ID;
+    tuple_length = ARRAY_LENGTH(relation_columns_column_types);
+    column_names = relation_columns_column_names;
+    column_types = relation_columns_column_types;
+  }
+  else
+  {
+    return (DatabaseGetRelationColumnMetadataResult){
+        .error = DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND};
   }
 
-  if (string_slice_eq(
-          relation_name, string_slice_from_ptr(relation_columns_relation_name)))
+  ColumnType *types = NULL;
+  String *names = NULL;
+
+  AllocateError status =
+      allocate((void **)&types, sizeof(*types) * tuple_length);
+  if (status == ALLOCATE_OK && write_names)
   {
-    ColumnsLength tuple_length = ARRAY_LENGTH(relation_columns_column_types);
-
-    if (database_get_static_relation_column_metadata(
-            relation_name,
-            tuple_length,
-            relation_columns_column_names,
-            relation_columns_column_types,
-            types,
-            names)
-        != ALLOCATE_OK)
-    {
-      return DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY;
-    }
-
-    *tuple_length_ = tuple_length;
-    *store = &db->relation_columns;
-    *is_internal = true;
-    return DATABASE_GET_RELATION_COLUMN_METADATA_OK;
+    status = allocate((void **)&names, sizeof(*names) * tuple_length);
   }
 
-  int64_t relation_id = 0;
-  if (!query_relation_id_by_name(*db, relation_name, &relation_id))
+  size_t column_index = 0;
+  for (; column_index < tuple_length && status == ALLOCATE_OK; ++column_index)
   {
-    return DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND;
+    types[column_index] = column_types[column_index];
+
+    if (write_names)
+    {
+      String *string = &names[column_index];
+      status = allocate_column_table_name(
+          &names[column_index],
+          relation_name,
+          string_slice_from_ptr(column_names[column_index]));
+    }
+  }
+
+  if (status != ALLOCATE_OK)
+  {
+    deallocate(types, sizeof(*types) * tuple_length);
+    if (write_names)
+    {
+      for (size_t i = 0; i < column_index; ++i) { string_destroy(&names[i]); }
+      deallocate(names, sizeof(*names) * tuple_length);
+    }
+    return (DatabaseGetRelationColumnMetadataResult){
+        .error = DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY};
+  }
+
+  return (DatabaseGetRelationColumnMetadataResult){
+      .tuple_length = (ColumnsLength)tuple_length,
+      .relation_id = relation_id,
+      .types = types,
+      .names = names,
+      .error = DATABASE_GET_RELATION_COLUMN_METADATA_OK};
+}
+
+static DatabaseGetRelationColumnMetadataResult
+database_get_relation_column_metadata(
+    Database *db, StringSlice relation_name, bool32 write_names)
+{
+  assert(db != NULL);
+
+  {
+    DatabaseGetRelationColumnMetadataResult result =
+        database_get_static_relation_column_metadata(
+            relation_name, write_names);
+
+    switch (result.error)
+    {
+    case DATABASE_GET_RELATION_COLUMN_METADATA_OK:
+    case DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY:
+    case DATABASE_GET_RELATION_COLUMN_METADATA_READING_DISK:
+      return result;
+
+    case DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND:
+      break;
+    }
+  }
+
+  QueryRelationIdByNameResult result =
+      query_relation_id_by_name(*db, relation_name);
+  switch (result.status)
+  {
+  case DISK_TUPLE_ITERATOR_STATUS_OK:
+    break;
+
+  case DISK_TUPLE_ITERATOR_STATUS_ERROR:
+    return (DatabaseGetRelationColumnMetadataResult){
+        .error = DATABASE_GET_RELATION_COLUMN_METADATA_READING_DISK};
+
+  case DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES:
+    return (DatabaseGetRelationColumnMetadataResult){
+        .error = DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND};
   }
 
   size_t tuple_length = 0;
   size_t largest_column_id = 0;
-  for (BlockTupleIterator i = memory_store_iterate(&db->relation_columns);
-       i.valid;
-       block_tuple_iterator_next(&i))
   {
-    ColumnValue tuple_relation_id = block_tuple_iterator_get(
-        &i,
-        relation_columns_column_types,
-        ARRAY_LENGTH(relation_columns_column_types),
-        0);
-
-    if (tuple_relation_id.integer != relation_id)
+    DiskTupleIterator i;
+    for (i = disk_buffer_pool_iterate(&db->pool, RELATION_COLUMNS_RELATION_ID);
+         i.status == DISK_TUPLE_ITERATOR_STATUS_OK;
+         disk_tuple_iterator_next(&i))
     {
-      continue;
+      ColumnValue tuple_relation_id = disk_tuple_iterator_get(
+          &i,
+          relation_columns_column_types,
+          ARRAY_LENGTH(relation_columns_column_types),
+          0);
+
+      if (tuple_relation_id.integer != result.relation_id)
+      {
+        continue;
+      }
+
+      ColumnValue column_id = disk_tuple_iterator_get(
+          &i,
+          relation_columns_column_types,
+          ARRAY_LENGTH(relation_columns_column_types),
+          1);
+
+      largest_column_id = MAX(column_id.integer, largest_column_id);
+      tuple_length += 1;
     }
-
-    ColumnValue column_id = block_tuple_iterator_get(
-        &i,
-        relation_columns_column_types,
-        ARRAY_LENGTH(relation_columns_column_types),
-        1);
-
-    largest_column_id = MAX(column_id.integer, largest_column_id);
-    tuple_length += 1;
+    disk_tuple_iterator_close(&i);
   }
 
   // We don't allow relations without columns to exist
   assert(tuple_length > 0);
   assert(tuple_length == largest_column_id + 1);
 
-  AllocateError status =
-      allocate((void **)types, sizeof(**types) * tuple_length);
+  ColumnType *types = NULL;
+  String *names = NULL;
 
-  if (status == ALLOCATE_OK && names != NULL)
+  AllocateError status =
+      allocate((void **)&types, sizeof(*types) * tuple_length);
+
+  if (status == ALLOCATE_OK && write_names)
   {
-    status = allocate((void **)names, sizeof(**names) * tuple_length);
+    status = allocate((void **)&names, sizeof(*names) * tuple_length);
 
     for (size_t i = 0; i < tuple_length; ++i)
     {
-      (*names)[i] = (String){
+      names[i] = (String){
           .data = NULL,
           .length = 0,
       };
     }
   }
 
-  for (BlockTupleIterator i = memory_store_iterate(&db->relation_columns);
-       i.valid && status == ALLOCATE_OK;
-       block_tuple_iterator_next(&i))
+  bool32 failed = false;
   {
-    ColumnValue tuple_relation_id = block_tuple_iterator_get(
-        &i,
-        relation_columns_column_types,
-        ARRAY_LENGTH(relation_columns_column_types),
-        0);
-
-    if (tuple_relation_id.integer != relation_id)
+    DiskTupleIterator i;
+    for (i = disk_buffer_pool_iterate(&db->pool, RELATION_COLUMNS_RELATION_ID);
+         i.status == DISK_TUPLE_ITERATOR_STATUS_OK && status == ALLOCATE_OK;
+         disk_tuple_iterator_next(&i))
     {
-      continue;
-    }
-
-    ColumnValue column_id = block_tuple_iterator_get(
-        &i,
-        relation_columns_column_types,
-        ARRAY_LENGTH(relation_columns_column_types),
-        1);
-
-    ColumnValue type = block_tuple_iterator_get(
-        &i,
-        relation_columns_column_types,
-        ARRAY_LENGTH(relation_columns_column_types),
-        3);
-
-    (*types)[column_id.integer] = type.integer;
-
-    if (names != NULL)
-    {
-      ColumnValue name = block_tuple_iterator_get(
+      ColumnValue tuple_relation_id = disk_tuple_iterator_get(
           &i,
           relation_columns_column_types,
           ARRAY_LENGTH(relation_columns_column_types),
-          2);
+          0);
 
-      status = allocate_column_table_name(
-          &(*names)[column_id.integer], relation_name, name.string);
-    }
-  }
-
-  if (status != ALLOCATE_OK)
-  {
-    deallocate(*types, sizeof(**types) * tuple_length);
-
-    if (names != NULL)
-    {
-      for (size_t i = 0; i < tuple_length; ++i)
+      if (tuple_relation_id.integer != result.relation_id)
       {
-        string_destroy(&(*names)[i]);
+        continue;
       }
-      deallocate(*names, sizeof(**names) * tuple_length);
+
+      ColumnValue column_id = disk_tuple_iterator_get(
+          &i,
+          relation_columns_column_types,
+          ARRAY_LENGTH(relation_columns_column_types),
+          1);
+
+      ColumnValue type = disk_tuple_iterator_get(
+          &i,
+          relation_columns_column_types,
+          ARRAY_LENGTH(relation_columns_column_types),
+          3);
+
+      types[column_id.integer] = type.integer;
+
+      if (write_names)
+      {
+        ColumnValue name = disk_tuple_iterator_get(
+            &i,
+            relation_columns_column_types,
+            ARRAY_LENGTH(relation_columns_column_types),
+            2);
+
+        status = allocate_column_table_name(
+            names + column_id.integer, relation_name, name.string);
+      }
     }
-    return DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY;
+
+    switch (i.status)
+    {
+    case DISK_TUPLE_ITERATOR_STATUS_OK:
+      // All tuple should be consumed, so iterator should fail or finish
+      assert(false);
+      break;
+
+    case DISK_TUPLE_ITERATOR_STATUS_ERROR:
+      failed = true;
+      break;
+
+    case DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES:
+      failed = false;
+      break;
+    }
+
+    disk_tuple_iterator_close(&i);
   }
 
-  *is_internal = false;
-  *tuple_length_ = (ColumnsLength)tuple_length;
-  *store =
-      &db->user_relations[find_user_relation_index(*db, relation_id)].store;
+  if (status != ALLOCATE_OK || failed)
+  {
+    deallocate(types, sizeof(*types) * tuple_length);
 
-  return DATABASE_GET_RELATION_COLUMN_METADATA_OK;
-}
+    if (write_names)
+    {
+      for (size_t i = 0; i < tuple_length; ++i) { string_destroy(names + i); }
+      deallocate(names, sizeof(*names) * tuple_length);
+    }
+    return (DatabaseGetRelationColumnMetadataResult){
+        .error = DATABASE_GET_RELATION_COLUMN_METADATA_OUT_OF_MEMORY};
+  }
 
-static DatabaseGetRelationColumnMetadataError
-database_get_relation_column_metadata(
-    Database *db,
-    StringSlice relation_name,
-    MemoryStore **store,
-    ColumnsLength *tuple_length,
-    ColumnType **types,
-    String **names)
-{
-  assert(types != NULL);
-  assert(*types == NULL);
-  assert(names != NULL);
-  assert(*names == NULL);
-
-  bool32 is_internal = false;
-  return database_get_relation_column_metadata_(
-      db, relation_name, &is_internal, store, tuple_length, types, names);
-}
-
-static DatabaseGetRelationColumnMetadataError
-database_get_relation_column_types(
-    Database *db,
-    StringSlice relation_name,
-    bool32 *is_internal,
-    MemoryStore **store,
-    ColumnsLength *tuple_length,
-    ColumnType **types)
-{
-  assert(types != NULL);
-  assert(*types == NULL);
-
-  return database_get_relation_column_metadata_(
-      db, relation_name, is_internal, store, tuple_length, types, NULL);
+  return (DatabaseGetRelationColumnMetadataResult){
+      .tuple_length = (ColumnsLength)tuple_length,
+      .relation_id = result.relation_id,
+      .types = types,
+      .names = names,
+      .error = DATABASE_GET_RELATION_COLUMN_METADATA_OK};
 }
 
 typedef enum
@@ -623,6 +616,7 @@ typedef enum
   DATABASE_INSERT_TUPLE_COLUMN_TYPE_MISMATCH,
   DATABASE_INSERT_TUPLE_COLUMNS_LENGTH_MISMATCH,
   DATABASE_INSERT_TUPLE_RELATION_NOT_FOUND,
+  DATABASE_INSERT_TUPLE_READING_DISK,
 } DatabaseInsertTupleError;
 
 // TODO: Take relation as argument
@@ -634,13 +628,10 @@ static DatabaseInsertTupleError database_insert_tuple(
     int16_t length)
 {
   assert(db != NULL);
+  DatabaseGetRelationColumnMetadataResult result =
+      database_get_relation_column_metadata(db, name, false);
 
-  ColumnType *columns_types = NULL;
-  ColumnsLength columns_length = 0;
-  MemoryStore *store = NULL;
-  bool32 is_internal = true;
-  switch (database_get_relation_column_types(
-      db, name, &is_internal, &store, &columns_length, &columns_types))
+  switch (result.error)
   {
   case DATABASE_GET_RELATION_COLUMN_METADATA_OK:
     break;
@@ -650,33 +641,36 @@ static DatabaseInsertTupleError database_insert_tuple(
 
   case DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND:
     return DATABASE_INSERT_TUPLE_RELATION_NOT_FOUND;
+
+  case DATABASE_GET_RELATION_COLUMN_METADATA_READING_DISK:
+    return DATABASE_INSERT_TUPLE_READING_DISK;
   }
 
-  if (is_internal)
+  if (result.relation_id < RESERVED_RELATION_IDS)
   {
     return DATABASE_INSERT_TUPLE_RELATION_NOT_FOUND;
   }
 
-  if (length != columns_length)
+  if (length != result.tuple_length)
   {
     return DATABASE_INSERT_TUPLE_COLUMNS_LENGTH_MISMATCH;
   }
 
   for (size_t i = 0; i < length; ++i)
   {
-    if (types[i] != columns_types[i])
+    if (types[i] != result.types[i])
     {
-      deallocate(columns_types, sizeof(*columns_types) * columns_length);
+      deallocate(result.types, sizeof(*result.types) * result.tuple_length);
       return DATABASE_INSERT_TUPLE_COLUMN_TYPE_MISMATCH;
     }
   }
 
-  deallocate(columns_types, sizeof(*columns_types) * columns_length);
+  deallocate(result.types, sizeof(*result.types) * result.tuple_length);
 
-  MemoryStoreInsertTupleError insert_error =
-      memory_store_insert_tuple(store, types, values, length);
+  DiskBufferPoolInsertTupleError insert_error = disk_buffer_pool_insert_tuple(
+      &db->pool, result.relation_id, types, values, length);
   // TODO: Use transactions to handle failure
-  assert(insert_error == MEMORY_STORE_INSERT_TUPLE_OK);
+  assert(insert_error == DISK_BUFFER_POOL_INSERT_TUPLE_OK);
 
   return DATABASE_INSERT_TUPLE_OK;
 }
@@ -687,7 +681,8 @@ typedef enum
   DATABASE_DELETE_TUPLES_OUT_OF_MEMORY,
   DATABASE_DELETE_TUPLES_COLUMN_INDEX_OUT_OF_RANGE,
   DATABASE_DELETE_TUPLES_COLUMN_TYPE_MISMATCH,
-  DATABASE_DELETE_TUPLES_RELATION_NOT_FOUND
+  DATABASE_DELETE_TUPLES_RELATION_NOT_FOUND,
+  DATABASE_DELETE_TUPLES_READING_DISK,
 } DatabaseDeleteTuplesError;
 
 static DatabaseDeleteTuplesError database_delete_tuples(
@@ -700,12 +695,10 @@ static DatabaseDeleteTuplesError database_delete_tuples(
 {
   assert(db != NULL);
 
-  ColumnType *columns_types = NULL;
-  ColumnsLength columns_length = 0;
-  MemoryStore *store = NULL;
-  bool32 is_internal = true;
-  switch (database_get_relation_column_types(
-      db, name, &is_internal, &store, &columns_length, &columns_types))
+  DatabaseGetRelationColumnMetadataResult result =
+      database_get_relation_column_metadata(db, name, false);
+
+  switch (result.error)
   {
   case DATABASE_GET_RELATION_COLUMN_METADATA_OK:
     break;
@@ -715,27 +708,38 @@ static DatabaseDeleteTuplesError database_delete_tuples(
 
   case DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND:
     return DATABASE_DELETE_TUPLES_RELATION_NOT_FOUND;
+
+  case DATABASE_GET_RELATION_COLUMN_METADATA_READING_DISK:
+    return DATABASE_DELETE_TUPLES_READING_DISK;
   }
 
-  if (is_internal)
+  if (result.relation_id < RESERVED_RELATION_IDS)
   {
+    deallocate(result.types, sizeof(*result.types) * result.tuple_length);
     return DATABASE_DELETE_TUPLES_RELATION_NOT_FOUND;
   }
 
-  if (column_index >= columns_length)
+  if (column_index >= result.tuple_length)
   {
+    deallocate(result.types, sizeof(*result.types) * result.tuple_length);
     return DATABASE_DELETE_TUPLES_COLUMN_INDEX_OUT_OF_RANGE;
   }
 
-  if (type != columns_types[column_index])
+  if (type != result.types[column_index])
   {
+    deallocate(result.types, sizeof(*result.types) * result.tuple_length);
     return DATABASE_DELETE_TUPLES_COLUMN_TYPE_MISMATCH;
   }
 
-  memory_store_delete_tuples(
-      store, columns_types, columns_length, column_index, value);
+  disk_buffer_pool_delete_tuples(
+      &db->pool,
+      result.relation_id,
+      result.types,
+      result.tuple_length,
+      column_index,
+      value);
 
-  deallocate(columns_types, sizeof(*columns_types) * columns_length);
+  deallocate(result.types, sizeof(*result.types) * result.tuple_length);
 
   return DATABASE_DELETE_TUPLES_OK;
 }
@@ -914,7 +918,7 @@ typedef struct TupleIterator
   {
     struct
     {
-      BlockTupleIterator it;
+      DiskTupleIterator it;
       ColumnsLength tuple_length;
       String *column_names;
       ColumnType *column_types;
@@ -948,6 +952,7 @@ void tuple_iterator_destroy(TupleIterator *it)
   {
   case QUERY_OPERATOR_READ:
   {
+    disk_tuple_iterator_close(&it->read.it);
     for (size_t i = 0; i < it->read.tuple_length; ++i)
     {
       string_destroy(&it->read.column_names[i]);
@@ -1006,12 +1011,12 @@ static ColumnsLength tuple_iterator_tuple_length(TupleIterator *it)
   }
 }
 
-static bool32 tuple_iterator_valid(TupleIterator *it)
+static DiskTupleIteratorStatus tuple_iterator_valid(TupleIterator *it)
 {
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-    return it->read.it.valid;
+    return it->read.it.status;
 
   case QUERY_OPERATOR_PROJECT:
     return tuple_iterator_valid(it->project.it);
@@ -1099,13 +1104,13 @@ tuple_iterator_column_type(TupleIterator *it, ColumnsLength column_id)
 static ColumnValue
 tuple_iterator_column_value(TupleIterator *it, ColumnsLength column_id)
 {
-  assert(tuple_iterator_valid(it));
+  assert(tuple_iterator_valid(it) == DISK_TUPLE_ITERATOR_STATUS_OK);
   assert(column_id < tuple_iterator_tuple_length(it));
 
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-    return block_tuple_iterator_get(
+    return disk_tuple_iterator_get(
         &it->read.it, it->read.column_types, it->read.tuple_length, column_id);
 
   case QUERY_OPERATOR_PROJECT:
@@ -1194,7 +1199,7 @@ static void tuple_iterator_next(TupleIterator *it)
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-    block_tuple_iterator_next(&it->read.it);
+    disk_tuple_iterator_next(&it->read.it);
     break;
 
   case QUERY_OPERATOR_PROJECT:
@@ -1204,7 +1209,7 @@ static void tuple_iterator_next(TupleIterator *it)
   case QUERY_OPERATOR_SELECT:
   {
     for (tuple_iterator_next(it->select.it);
-         tuple_iterator_valid(it->select.it)
+         tuple_iterator_valid(it->select.it) == DISK_TUPLE_ITERATOR_STATUS_OK
          && !tuple_iterator_select_tuple(it);
          tuple_iterator_next(it->select.it))
     {
@@ -1215,7 +1220,8 @@ static void tuple_iterator_next(TupleIterator *it)
   case QUERY_OPERATOR_CARTESIAN_PRODUCT:
   {
     tuple_iterator_next(it->cartesian_product.rhs);
-    if (!tuple_iterator_valid(it->cartesian_product.rhs))
+    if (tuple_iterator_valid(it->cartesian_product.rhs)
+        == DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES)
     {
       tuple_iterator_reset(it->cartesian_product.rhs);
       tuple_iterator_next(it->cartesian_product.lhs);
@@ -1230,8 +1236,13 @@ static void tuple_iterator_reset(TupleIterator *it)
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-    it->read.it = memory_store_iterate(it->read.it.store);
-    break;
+  {
+    MappedBuffer *buffer = it->read.it.pool->buffers + it->read.it.buffer_index;
+    RelationId relation_id = buffer->relation_id;
+    disk_tuple_iterator_close(&it->read.it);
+    it->read.it = disk_buffer_pool_iterate(it->read.it.pool, relation_id);
+  }
+  break;
 
   case QUERY_OPERATOR_PROJECT:
     tuple_iterator_reset(it->project.it);
@@ -1304,6 +1315,7 @@ typedef enum
   DATABASE_QUERY_RELATION_NOT_FOUND,
   DATABASE_QUERY_COLUMN_NOT_FOUND,
   DATABASE_QUERY_OPERATOR_TYPE_MISMATCH,
+  DATABASE_QUERY_READING_DISK,
 } DatabaseQueryError;
 
 static DatabaseQueryError database_query_select_fill_predicate_variable(
@@ -1474,27 +1486,21 @@ static DatabaseQueryError database_query(
     {
     case QUERY_OPERATOR_READ:
     {
-      MemoryStore *store = NULL;
-      ColumnsLength tuple_length = 0;
-      ColumnType *types = NULL;
-      String *names = NULL;
-      switch (database_get_relation_column_metadata(
-          db,
-          parameters[query].read_relation_name,
-          &store,
-          &tuple_length,
-          &types,
-          &names))
+      DatabaseGetRelationColumnMetadataResult result =
+          database_get_relation_column_metadata(
+              db, parameters[query].read_relation_name, true);
+      switch (result.error)
       {
       case DATABASE_GET_RELATION_COLUMN_METADATA_OK:
         iterators[query] = (TupleIterator){
             .operator= QUERY_OPERATOR_READ,
             .read =
                 {
-                    .it = memory_store_iterate(store),
-                    .column_names = names,
-                    .column_types = types,
-                    .tuple_length = tuple_length,
+                    .it =
+                        disk_buffer_pool_iterate(&db->pool, result.relation_id),
+                    .column_names = result.names,
+                    .column_types = result.types,
+                    .tuple_length = result.tuple_length,
                 },
         };
         break;
@@ -1505,6 +1511,10 @@ static DatabaseQueryError database_query(
 
       case DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND:
         status = DATABASE_QUERY_RELATION_NOT_FOUND;
+        break;
+
+      case DATABASE_GET_RELATION_COLUMN_METADATA_READING_DISK:
+        status = DATABASE_QUERY_READING_DISK;
         break;
       }
     }

@@ -1,8 +1,11 @@
-#include "linux.h"
 #include "logical.h"
 #include "parser.h"
-
+#include <fcntl.h>
 #include <stdio.h>
+#include <sys/stat.h>
+
+#define FILE_RETRIES 1000
+#define MAX_OPEN_BUFFERS 10
 
 #define USERS_TABLE_NAME "users"
 #define SHOPPING_CART_TABLE_NAME "shopping_cart"
@@ -24,7 +27,8 @@ static void query_iterator_print(QueryIterator query_it)
 
   printf("\n---------\n");
 
-  for (; tuple_iterator_valid(it); tuple_iterator_next(it))
+  for (; tuple_iterator_valid(it) == DISK_TUPLE_ITERATOR_STATUS_OK;
+       tuple_iterator_next(it))
   {
     for (ColumnsLength column = 0; column < tuple_length; ++column)
     {
@@ -48,6 +52,8 @@ static void query_iterator_print(QueryIterator query_it)
     }
     printf("\n");
   }
+
+  assert(tuple_iterator_valid(it) == DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES);
 
   printf("\n\n");
 }
@@ -607,8 +613,38 @@ int main(int argc, char *argv[])
   UNUSED(argc);
   UNUSED(argv);
 
+  size_t memory_length = MAX_OPEN_BUFFERS * (PAGE_SIZE + sizeof(MappedBuffer));
+  void *data = malloc(memory_length);
+
   Database db = {};
-  assert(database_new(&db, 1, 1, 1) == ALLOCATE_OK);
+  {
+    char path[LINUX_PATH_MAX];
+    StringSlice tmp_path = string_slice_from_ptr("/tmp/db/");
+    size_t tmp_path_end_index =
+        string_slice_concat(path, 0, LINUX_PATH_MAX, tmp_path, false);
+
+    bool32 found = false;
+    for (size_t i = 0; i < FILE_RETRIES && !found; ++i)
+    {
+      assert(sprintf(path + tmp_path_end_index, "%zu", i) > 0);
+
+      struct stat st = {};
+      if (stat(path, &st) == -1)
+      {
+        break;
+      }
+    }
+
+    assert(
+        mkdir(
+            path,
+            S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH)
+        == 0);
+
+    assert(
+        database_new(&db, string_slice_from_ptr(path), data, memory_length)
+        == DISK_BUFFER_POOL_CREATE_RELATION_OK);
+  }
 
   printf("Creating users table\n");
   create_users_table(&db);
@@ -662,4 +698,6 @@ int main(int argc, char *argv[])
   drop_table(&db);
   dump_relations_table(&db);
   dump_relation_columns_table(&db);
+
+  free(data);
 }
