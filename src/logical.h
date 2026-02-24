@@ -85,45 +85,44 @@ database_new(Database *db, StringSlice path, void *data, size_t length)
   }
 
   DiskBufferPoolCreateRelationError error =
-      disk_buffer_pool_create_relation(&db->pool, RELATIONS_RELATION_ID, false);
-  if (error != DISK_BUFFER_POOL_CREATE_RELATION_OK)
+      relation_create(&db->pool, RELATIONS_RELATION_ID, false);
+  if (error != RELATION_CREATE_OK)
   {
     return error;
   }
 
-  return disk_buffer_pool_create_relation(
-      &db->pool, RELATION_COLUMNS_RELATION_ID, false);
+  return relation_create(&db->pool, RELATION_COLUMNS_RELATION_ID, false);
 }
 
 typedef struct
 {
   RelationId relation_id;
-  DiskTupleIteratorStatus status;
+  RelationIteratorStatus status;
 } QueryRelationIdByNameResult;
 
 static QueryRelationIdByNameResult
 query_relation_id_by_name(Database db, StringSlice name)
 {
-  DiskTupleIterator i;
-  for (i = disk_buffer_pool_iterate(&db.pool, RELATIONS_RELATION_ID);
-       i.status == DISK_TUPLE_ITERATOR_STATUS_OK;
-       disk_tuple_iterator_next(&i))
+  RelationIterator i;
+  for (i = relation_iterate(&db.pool, RELATIONS_RELATION_ID);
+       i.status == RELATION_ITERATOR_STATUS_OK;
+       relation_iterator_next(&i))
   {
-    ColumnValue tuple_name = disk_tuple_iterator_get(
+    ColumnValue tuple_name = relation_iterator_get(
         &i, relations_column_types, ARRAY_LENGTH(relations_column_types), 1);
     if (string_slice_eq(name, tuple_name.string))
     {
-      ColumnValue tuple_id = disk_tuple_iterator_get(
+      ColumnValue tuple_id = relation_iterator_get(
           &i, relations_column_types, ARRAY_LENGTH(relations_column_types), 0);
 
-      disk_tuple_iterator_close(&i);
+      relation_iterator_close(&i);
       return (QueryRelationIdByNameResult){
-          .status = DISK_TUPLE_ITERATOR_STATUS_OK,
+          .status = RELATION_ITERATOR_STATUS_OK,
           .relation_id = tuple_id.integer,
       };
     }
   }
-  disk_tuple_iterator_close(&i);
+  relation_iterator_close(&i);
 
   return (QueryRelationIdByNameResult){
       .status = i.status,
@@ -156,13 +155,13 @@ static DatabaseCreateTableError database_create_table(
 
   int64_t relation_id = RESERVED_RELATION_IDS;
   {
-    DiskTupleIterator i;
+    RelationIterator i;
     bool32 exists = false;
-    for (i = disk_buffer_pool_iterate(&db->pool, RELATIONS_RELATION_ID);
-         i.status == DISK_TUPLE_ITERATOR_STATUS_OK;
-         disk_tuple_iterator_next(&i))
+    for (i = relation_iterate(&db->pool, RELATIONS_RELATION_ID);
+         i.status == RELATION_ITERATOR_STATUS_OK;
+         relation_iterator_next(&i))
     {
-      ColumnValue tuple_id = disk_tuple_iterator_get(
+      ColumnValue tuple_id = relation_iterator_get(
           &i, relations_column_types, ARRAY_LENGTH(relations_column_types), 0);
 
       if (relation_id <= tuple_id.integer)
@@ -170,7 +169,7 @@ static DatabaseCreateTableError database_create_table(
         relation_id = tuple_id.integer + 1;
       }
 
-      ColumnValue tuple_name = disk_tuple_iterator_get(
+      ColumnValue tuple_name = relation_iterator_get(
           &i, relations_column_types, ARRAY_LENGTH(relations_column_types), 1);
 
       if (string_slice_eq(name, tuple_name.string))
@@ -180,7 +179,7 @@ static DatabaseCreateTableError database_create_table(
       }
     }
 
-    disk_tuple_iterator_close(&i);
+    relation_iterator_close(&i);
 
     if (exists)
     {
@@ -189,14 +188,14 @@ static DatabaseCreateTableError database_create_table(
 
     switch (i.status)
     {
-    case DISK_TUPLE_ITERATOR_STATUS_OK:
+    case RELATION_ITERATOR_STATUS_OK:
       assert(false);
       break;
 
-    case DISK_TUPLE_ITERATOR_STATUS_ERROR:
+    case RELATION_ITERATOR_STATUS_ERROR:
       return DATABASE_CREATE_TABLE_READING_DISK;
 
-    case DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES:
+    case RELATION_ITERATOR_STATUS_NO_MORE_TUPLES:
       break;
     }
   }
@@ -204,16 +203,15 @@ static DatabaseCreateTableError database_create_table(
   assert(relation_id >= RESERVED_RELATION_IDS);
 
   DiskBufferPoolCreateRelationError error =
-      disk_buffer_pool_create_relation(&db->pool, relation_id, true);
-  if (error != DISK_BUFFER_POOL_CREATE_RELATION_OK)
+      relation_create(&db->pool, relation_id, true);
+  if (error != RELATION_CREATE_OK)
   {
     return DATABASE_CREATE_TABLE_CREATING_FILE;
   }
 
-  DiskBufferPoolInsertTupleError insert_error =
-      DISK_BUFFER_POOL_INSERT_TUPLE_OK;
+  RelationInsertTupleError insert_error = RELATION_INSERT_TUPLE_OK;
   for (int16_t column = 0;
-       column < length && insert_error == DISK_BUFFER_POOL_INSERT_TUPLE_OK;
+       column < length && insert_error == RELATION_INSERT_TUPLE_OK;
        ++column)
   {
     ColumnValue relation_column_values[] = {
@@ -226,7 +224,7 @@ static DatabaseCreateTableError database_create_table(
         ARRAY_LENGTH(relation_column_values)
         == ARRAY_LENGTH(relation_columns_column_types));
 
-    insert_error = disk_buffer_pool_insert_tuple(
+    insert_error = relation_insert_tuple(
         &db->pool,
         RELATION_COLUMNS_RELATION_ID,
         relation_columns_column_types,
@@ -234,7 +232,7 @@ static DatabaseCreateTableError database_create_table(
         ARRAY_LENGTH(relation_column_values));
   }
 
-  if (insert_error == DISK_BUFFER_POOL_INSERT_TUPLE_OK)
+  if (insert_error == RELATION_INSERT_TUPLE_OK)
   {
     ColumnValue relations_values[] = {
         {.integer = relation_id},
@@ -243,7 +241,7 @@ static DatabaseCreateTableError database_create_table(
     STATIC_ASSERT(
         ARRAY_LENGTH(relations_values) == ARRAY_LENGTH(relations_column_types));
 
-    insert_error = disk_buffer_pool_insert_tuple(
+    insert_error = relation_insert_tuple(
         &db->pool,
         RELATIONS_RELATION_ID,
         relations_column_types,
@@ -251,9 +249,9 @@ static DatabaseCreateTableError database_create_table(
         ARRAY_LENGTH(relations_values));
   }
 
-  if (insert_error != DISK_BUFFER_POOL_INSERT_TUPLE_OK)
+  if (insert_error != RELATION_INSERT_TUPLE_OK)
   {
-    disk_buffer_pool_delete_tuples(
+    relation_delete_tuples(
         &db->pool,
         RELATION_COLUMNS_RELATION_ID,
         relation_columns_column_types,
@@ -261,7 +259,7 @@ static DatabaseCreateTableError database_create_table(
         0,
         (ColumnValue){.integer = relation_id});
 
-    disk_buffer_pool_delete_tuples(
+    relation_delete_tuples(
         &db->pool,
         RELATIONS_RELATION_ID,
         relations_column_types,
@@ -292,17 +290,17 @@ database_drop_table(Database *db, StringSlice name)
   QueryRelationIdByNameResult result = query_relation_id_by_name(*db, name);
   switch (result.status)
   {
-  case DISK_TUPLE_ITERATOR_STATUS_OK:
+  case RELATION_ITERATOR_STATUS_OK:
     break;
 
-  case DISK_TUPLE_ITERATOR_STATUS_ERROR:
+  case RELATION_ITERATOR_STATUS_ERROR:
     return DATABASE_DROP_TABLE_READING_DISK;
 
-  case DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES:
+  case RELATION_ITERATOR_STATUS_NO_MORE_TUPLES:
     return DATABASE_DROP_TABLE_NOT_FOUND;
   }
 
-  disk_buffer_pool_delete_tuples(
+  relation_delete_tuples(
       &db->pool,
       RELATION_COLUMNS_RELATION_ID,
       relation_columns_column_types,
@@ -310,7 +308,7 @@ database_drop_table(Database *db, StringSlice name)
       0,
       (ColumnValue){.integer = result.relation_id});
 
-  disk_buffer_pool_delete_tuples(
+  relation_delete_tuples(
       &db->pool,
       RELATIONS_RELATION_ID,
       relations_column_types,
@@ -458,14 +456,14 @@ database_get_relation_column_metadata(
       query_relation_id_by_name(*db, relation_name);
   switch (result.status)
   {
-  case DISK_TUPLE_ITERATOR_STATUS_OK:
+  case RELATION_ITERATOR_STATUS_OK:
     break;
 
-  case DISK_TUPLE_ITERATOR_STATUS_ERROR:
+  case RELATION_ITERATOR_STATUS_ERROR:
     return (DatabaseGetRelationColumnMetadataResult){
         .error = DATABASE_GET_RELATION_COLUMN_METADATA_READING_DISK};
 
-  case DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES:
+  case RELATION_ITERATOR_STATUS_NO_MORE_TUPLES:
     return (DatabaseGetRelationColumnMetadataResult){
         .error = DATABASE_GET_RELATION_COLUMN_METADATA_RELATION_NOT_FOUND};
   }
@@ -473,12 +471,12 @@ database_get_relation_column_metadata(
   size_t tuple_length = 0;
   size_t largest_column_id = 0;
   {
-    DiskTupleIterator i;
-    for (i = disk_buffer_pool_iterate(&db->pool, RELATION_COLUMNS_RELATION_ID);
-         i.status == DISK_TUPLE_ITERATOR_STATUS_OK;
-         disk_tuple_iterator_next(&i))
+    RelationIterator i;
+    for (i = relation_iterate(&db->pool, RELATION_COLUMNS_RELATION_ID);
+         i.status == RELATION_ITERATOR_STATUS_OK;
+         relation_iterator_next(&i))
     {
-      ColumnValue tuple_relation_id = disk_tuple_iterator_get(
+      ColumnValue tuple_relation_id = relation_iterator_get(
           &i,
           relation_columns_column_types,
           ARRAY_LENGTH(relation_columns_column_types),
@@ -489,7 +487,7 @@ database_get_relation_column_metadata(
         continue;
       }
 
-      ColumnValue column_id = disk_tuple_iterator_get(
+      ColumnValue column_id = relation_iterator_get(
           &i,
           relation_columns_column_types,
           ARRAY_LENGTH(relation_columns_column_types),
@@ -498,7 +496,7 @@ database_get_relation_column_metadata(
       largest_column_id = MAX(column_id.integer, largest_column_id);
       tuple_length += 1;
     }
-    disk_tuple_iterator_close(&i);
+    relation_iterator_close(&i);
   }
 
   // We don't allow relations without columns to exist
@@ -526,12 +524,12 @@ database_get_relation_column_metadata(
 
   bool32 failed = false;
   {
-    DiskTupleIterator i;
-    for (i = disk_buffer_pool_iterate(&db->pool, RELATION_COLUMNS_RELATION_ID);
-         i.status == DISK_TUPLE_ITERATOR_STATUS_OK && status == ALLOCATE_OK;
-         disk_tuple_iterator_next(&i))
+    RelationIterator i;
+    for (i = relation_iterate(&db->pool, RELATION_COLUMNS_RELATION_ID);
+         i.status == RELATION_ITERATOR_STATUS_OK && status == ALLOCATE_OK;
+         relation_iterator_next(&i))
     {
-      ColumnValue tuple_relation_id = disk_tuple_iterator_get(
+      ColumnValue tuple_relation_id = relation_iterator_get(
           &i,
           relation_columns_column_types,
           ARRAY_LENGTH(relation_columns_column_types),
@@ -542,13 +540,13 @@ database_get_relation_column_metadata(
         continue;
       }
 
-      ColumnValue column_id = disk_tuple_iterator_get(
+      ColumnValue column_id = relation_iterator_get(
           &i,
           relation_columns_column_types,
           ARRAY_LENGTH(relation_columns_column_types),
           1);
 
-      ColumnValue type = disk_tuple_iterator_get(
+      ColumnValue type = relation_iterator_get(
           &i,
           relation_columns_column_types,
           ARRAY_LENGTH(relation_columns_column_types),
@@ -558,7 +556,7 @@ database_get_relation_column_metadata(
 
       if (write_names)
       {
-        ColumnValue name = disk_tuple_iterator_get(
+        ColumnValue name = relation_iterator_get(
             &i,
             relation_columns_column_types,
             ARRAY_LENGTH(relation_columns_column_types),
@@ -571,21 +569,21 @@ database_get_relation_column_metadata(
 
     switch (i.status)
     {
-    case DISK_TUPLE_ITERATOR_STATUS_OK:
+    case RELATION_ITERATOR_STATUS_OK:
       // All tuple should be consumed, so iterator should fail or finish
       assert(false);
       break;
 
-    case DISK_TUPLE_ITERATOR_STATUS_ERROR:
+    case RELATION_ITERATOR_STATUS_ERROR:
       failed = true;
       break;
 
-    case DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES:
+    case RELATION_ITERATOR_STATUS_NO_MORE_TUPLES:
       failed = false;
       break;
     }
 
-    disk_tuple_iterator_close(&i);
+    relation_iterator_close(&i);
   }
 
   if (status != ALLOCATE_OK || failed)
@@ -667,10 +665,10 @@ static DatabaseInsertTupleError database_insert_tuple(
 
   deallocate(result.types, sizeof(*result.types) * result.tuple_length);
 
-  DiskBufferPoolInsertTupleError insert_error = disk_buffer_pool_insert_tuple(
+  RelationInsertTupleError insert_error = relation_insert_tuple(
       &db->pool, result.relation_id, types, values, length);
   // TODO: Use transactions to handle failure
-  assert(insert_error == DISK_BUFFER_POOL_INSERT_TUPLE_OK);
+  assert(insert_error == RELATION_INSERT_TUPLE_OK);
 
   return DATABASE_INSERT_TUPLE_OK;
 }
@@ -731,7 +729,7 @@ static DatabaseDeleteTuplesError database_delete_tuples(
     return DATABASE_DELETE_TUPLES_COLUMN_TYPE_MISMATCH;
   }
 
-  disk_buffer_pool_delete_tuples(
+  relation_delete_tuples(
       &db->pool,
       result.relation_id,
       result.types,
@@ -918,7 +916,7 @@ typedef struct TupleIterator
   {
     struct
     {
-      DiskTupleIterator it;
+      RelationIterator it;
       ColumnsLength tuple_length;
       String *column_names;
       ColumnType *column_types;
@@ -952,7 +950,7 @@ void tuple_iterator_destroy(TupleIterator *it)
   {
   case QUERY_OPERATOR_READ:
   {
-    disk_tuple_iterator_close(&it->read.it);
+    relation_iterator_close(&it->read.it);
     for (size_t i = 0; i < it->read.tuple_length; ++i)
     {
       string_destroy(&it->read.column_names[i]);
@@ -1011,7 +1009,7 @@ static ColumnsLength tuple_iterator_tuple_length(TupleIterator *it)
   }
 }
 
-static DiskTupleIteratorStatus tuple_iterator_valid(TupleIterator *it)
+static RelationIteratorStatus tuple_iterator_valid(TupleIterator *it)
 {
   switch (it->operator)
   {
@@ -1104,13 +1102,13 @@ tuple_iterator_column_type(TupleIterator *it, ColumnsLength column_id)
 static ColumnValue
 tuple_iterator_column_value(TupleIterator *it, ColumnsLength column_id)
 {
-  assert(tuple_iterator_valid(it) == DISK_TUPLE_ITERATOR_STATUS_OK);
+  assert(tuple_iterator_valid(it) == RELATION_ITERATOR_STATUS_OK);
   assert(column_id < tuple_iterator_tuple_length(it));
 
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-    return disk_tuple_iterator_get(
+    return relation_iterator_get(
         &it->read.it, it->read.column_types, it->read.tuple_length, column_id);
 
   case QUERY_OPERATOR_PROJECT:
@@ -1199,7 +1197,7 @@ static void tuple_iterator_next(TupleIterator *it)
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-    disk_tuple_iterator_next(&it->read.it);
+    relation_iterator_next(&it->read.it);
     break;
 
   case QUERY_OPERATOR_PROJECT:
@@ -1209,7 +1207,7 @@ static void tuple_iterator_next(TupleIterator *it)
   case QUERY_OPERATOR_SELECT:
   {
     for (tuple_iterator_next(it->select.it);
-         tuple_iterator_valid(it->select.it) == DISK_TUPLE_ITERATOR_STATUS_OK
+         tuple_iterator_valid(it->select.it) == RELATION_ITERATOR_STATUS_OK
          && !tuple_iterator_select_tuple(it);
          tuple_iterator_next(it->select.it))
     {
@@ -1221,7 +1219,7 @@ static void tuple_iterator_next(TupleIterator *it)
   {
     tuple_iterator_next(it->cartesian_product.rhs);
     if (tuple_iterator_valid(it->cartesian_product.rhs)
-        == DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES)
+        == RELATION_ITERATOR_STATUS_NO_MORE_TUPLES)
     {
       tuple_iterator_reset(it->cartesian_product.rhs);
       tuple_iterator_next(it->cartesian_product.lhs);
@@ -1238,9 +1236,8 @@ static void tuple_iterator_reset(TupleIterator *it)
   case QUERY_OPERATOR_READ:
   {
     MappedBuffer *buffer = it->read.it.pool->buffers + it->read.it.buffer_index;
-    RelationId relation_id = buffer->relation_id;
-    disk_tuple_iterator_close(&it->read.it);
-    it->read.it = disk_buffer_pool_iterate(it->read.it.pool, relation_id);
+    relation_iterator_close(&it->read.it);
+    it->read.it = relation_iterate(it->read.it.pool, it->read.it.relation_id);
   }
   break;
 
@@ -1496,8 +1493,7 @@ static DatabaseQueryError database_query(
             .operator= QUERY_OPERATOR_READ,
             .read =
                 {
-                    .it =
-                        disk_buffer_pool_iterate(&db->pool, result.relation_id),
+                    .it = relation_iterate(&db->pool, result.relation_id),
                     .column_names = result.names,
                     .column_types = result.types,
                     .tuple_length = result.tuple_length,

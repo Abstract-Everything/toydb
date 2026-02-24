@@ -27,7 +27,7 @@ static void query_iterator_print(QueryIterator query_it)
 
   printf("\n---------\n");
 
-  for (; tuple_iterator_valid(it) == DISK_TUPLE_ITERATOR_STATUS_OK;
+  for (; tuple_iterator_valid(it) == RELATION_ITERATOR_STATUS_OK;
        tuple_iterator_next(it))
   {
     for (ColumnsLength column = 0; column < tuple_length; ++column)
@@ -53,7 +53,7 @@ static void query_iterator_print(QueryIterator query_it)
     printf("\n");
   }
 
-  assert(tuple_iterator_valid(it) == DISK_TUPLE_ITERATOR_STATUS_NO_MORE_TUPLES);
+  assert(tuple_iterator_valid(it) == RELATION_ITERATOR_STATUS_NO_MORE_TUPLES);
 
   printf("\n\n");
 }
@@ -643,7 +643,7 @@ int main(int argc, char *argv[])
 
     assert(
         database_new(&db, string_slice_from_ptr(path), data, memory_length)
-        == DISK_BUFFER_POOL_CREATE_RELATION_OK);
+        == RELATION_CREATE_OK);
   }
 
   printf("Creating users table\n");
