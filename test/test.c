@@ -43,6 +43,10 @@ static void query_iterator_print(QueryIterator query_it)
       case COLUMN_TYPE_STRING:
         printf("%.*s", (int)value.string.length, value.string.data);
         break;
+
+      case COLUMN_TYPE_BOOLEAN:
+        printf("%s", value.boolean == 0 ? "false" : "true");
+        break;
       }
 
       if (column < tuple_length - 1)
@@ -153,11 +157,13 @@ static void dump_shopping_cart_table(Database *db)
 const ColumnType users_relation_types[] = {
     COLUMN_TYPE_INTEGER,
     COLUMN_TYPE_STRING,
+    COLUMN_TYPE_BOOLEAN,
 };
 
 const char *const users_relation_names[] = {
     "id",
     "email",
+    "is_admin",
 };
 
 const ColumnType shopping_cart_relation_types[] = {
@@ -175,6 +181,7 @@ static void create_users_table(Database *db)
   const StringSlice names_slice[] = {
       string_slice_from_ptr(users_relation_names[0]),
       string_slice_from_ptr(users_relation_names[1]),
+      string_slice_from_ptr(users_relation_names[2]),
   };
 
   STATIC_ASSERT(
@@ -220,6 +227,7 @@ static void insert_users(Database *db)
   const ColumnValue values1[] = {
       {.integer = 0},
       {.string = string_slice_from_ptr("user@company")},
+      {.boolean = (StoreBoolean) false},
   };
   STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values1));
   assert(
@@ -234,6 +242,7 @@ static void insert_users(Database *db)
   const ColumnValue values2[] = {
       {.integer = 1},
       {.string = string_slice_from_ptr("admin@company")},
+      {.boolean = (StoreBoolean) true},
   };
   STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values2));
   assert(
@@ -248,6 +257,7 @@ static void insert_users(Database *db)
   const ColumnValue values3[] = {
       {.integer = 2},
       {.string = string_slice_from_ptr("guest@company")},
+      {.boolean = (StoreBoolean) false},
   };
   STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values3));
   assert(
@@ -520,6 +530,7 @@ static void delete_tuples(Database *db)
   const ColumnValue values[] = {
       {.integer = 0},
       {.string = string_slice_from_ptr("user@company")},
+      {.boolean = (StoreBoolean) false},
   };
   STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values));
   assert(

@@ -762,6 +762,7 @@ typedef enum
 {
   PREDICATE_OPERATOR_GRANULAR_TRUE,
   PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL,
+  PREDICATE_OPERATOR_GRANULAR_BOOLEAN_EQUAL,
   PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL,
   PREDICATE_OPERATOR_GRANULAR_STRING_LIKE,
 } PredicateOperatorGranular;
@@ -1172,6 +1173,10 @@ bool32 tuple_iterator_select_tuple(TupleIterator *it)
       satisfied = lhs.integer == rhs.integer;
       break;
 
+    case PREDICATE_OPERATOR_GRANULAR_BOOLEAN_EQUAL:
+      satisfied = lhs.boolean == rhs.boolean;
+      break;
+
     case PREDICATE_OPERATOR_GRANULAR_STRING_EQUAL:
       satisfied = string_slice_eq(lhs.string, rhs.string);
       break;
@@ -1413,6 +1418,10 @@ DatabaseQueryError database_query_select(
       {
       case COLUMN_TYPE_INTEGER:
         operator= PREDICATE_OPERATOR_GRANULAR_INTEGER_EQUAL;
+        break;
+
+      case COLUMN_TYPE_BOOLEAN:
+        operator= PREDICATE_OPERATOR_GRANULAR_BOOLEAN_EQUAL;
         break;
 
       case COLUMN_TYPE_STRING:

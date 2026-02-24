@@ -311,6 +311,8 @@ typedef int16_t ColumnsLength;
 // ----- Store types -----
 typedef int64_t StoreInteger;
 
+typedef int8_t StoreBoolean;
+
 typedef struct
 {
   int16_t offset;
@@ -320,6 +322,7 @@ typedef struct
 typedef union
 {
   StoreInteger integer;
+  StoreBoolean boolean;
   StoreString string;
 } StoredValue;
 // ----- Store types -----
@@ -328,6 +331,7 @@ typedef enum
 {
   COLUMN_TYPE_INTEGER,
   COLUMN_TYPE_STRING,
+  COLUMN_TYPE_BOOLEAN,
 } ColumnType;
 
 typedef StoreInteger MemoryInteger;
@@ -341,6 +345,7 @@ typedef struct
 typedef union
 {
   StoreInteger integer;
+  StoreBoolean boolean;
   StringSlice string;
 } ColumnValue;
 
@@ -394,8 +399,13 @@ static size_t column_type_fixed_size(ColumnType type)
   {
   case COLUMN_TYPE_INTEGER:
     return sizeof(value.integer);
+
   case COLUMN_TYPE_STRING:
     return sizeof(value.string);
+
+  // TODO: PACK boolean values
+  case COLUMN_TYPE_BOOLEAN:
+    return sizeof(value.boolean);
   }
 }
 
@@ -404,6 +414,7 @@ static size_t column_type_variable_size(ColumnType type, ColumnValue value)
   switch (type)
   {
   case COLUMN_TYPE_INTEGER:
+  case COLUMN_TYPE_BOOLEAN:
     return 0;
 
   case COLUMN_TYPE_STRING:
@@ -781,10 +792,12 @@ static RelationInsertTupleError relation_insert_tuple(
     {
 
     case COLUMN_TYPE_INTEGER:
-    {
       field->integer = values[column].integer;
-    }
-    break;
+      break;
+
+    case COLUMN_TYPE_BOOLEAN:
+      field->boolean = values[column].boolean;
+      break;
 
     case COLUMN_TYPE_STRING:
     {
@@ -897,10 +910,12 @@ static void relation_delete_tuples(
       switch (types[column_index])
       {
       case COLUMN_TYPE_INTEGER:
-      {
         delete = field->integer == value.integer;
-      }
-      break;
+        break;
+
+      case COLUMN_TYPE_BOOLEAN:
+        delete = field->boolean == value.boolean;
+        break;
 
       case COLUMN_TYPE_STRING:
       {
@@ -924,6 +939,7 @@ static void relation_delete_tuples(
         switch (types[column])
         {
         case COLUMN_TYPE_INTEGER:
+        case COLUMN_TYPE_BOOLEAN:
           break;
 
         case COLUMN_TYPE_STRING:
@@ -1150,13 +1166,14 @@ static ColumnValue relation_iterator_get(
   switch (types[column_index])
   {
   case COLUMN_TYPE_INTEGER:
-  {
     return (ColumnValue){.integer = field->integer};
-  }
-  break;
+    break;
+
+  case COLUMN_TYPE_BOOLEAN:
+    return (ColumnValue){.boolean = field->boolean};
+    break;
 
   case COLUMN_TYPE_STRING:
-  {
     return (ColumnValue){
         .string =
             (StringSlice){
@@ -1164,8 +1181,7 @@ static ColumnValue relation_iterator_get(
                 .data = &buffer->page[field->string.offset],
             },
     };
-  }
-  break;
+    break;
   }
 }
 
