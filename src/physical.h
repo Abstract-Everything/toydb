@@ -505,6 +505,22 @@ size_t relation_free_space(MappedBuffer buffer, TupleSizes tuple_sizes)
          - (tuple_sizes.fixed_size * header->allocated_records);
 }
 
+bool32 relation_has_at_least_one_primary_key(
+    const bool32 *primary_keys, ColumnsLength tuple_length)
+{
+  assert(primary_keys != NULL);
+
+  for (ColumnsLength i = 0; i < tuple_length; ++i)
+  {
+    if (primary_keys[i])
+    {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 typedef enum
 {
   RELATION_CREATE_OK,
@@ -513,11 +529,25 @@ typedef enum
   RELATION_CREATE_ALREADY_EXISTS,
   RELATION_CREATE_PROGRAM_ERROR,
   RELATION_CREATE_FAILED_TO_WRITE,
+  RELATION_CREATE_NO_PRIMARY_KEY,
 } RelationCreateError;
 
-static RelationCreateError
-relation_create(DiskBufferPool *pool, RelationId id, bool32 expect_new)
+static RelationCreateError relation_create(
+    DiskBufferPool *pool,
+    RelationId id,
+    const bool32 *primary_keys,
+    ColumnsLength tuple_length,
+    bool32 expect_new)
 {
+  assert(pool != NULL);
+  assert(primary_keys != NULL);
+  assert(tuple_length > 0);
+
+  if (!relation_has_at_least_one_primary_key(primary_keys, tuple_length))
+  {
+    return RELATION_CREATE_NO_PRIMARY_KEY;
+  }
+
   char path[LINUX_PATH_MAX] = {};
   relation_id_to_path(pool->save_path, id, path, ARRAY_LENGTH(path));
   LinuxOpenResult open_result = linux_open(
@@ -653,13 +683,77 @@ static void relation_delete(DiskBufferPool *pool, RelationId id)
   assert(error == LINUX_UNLINK_OK);
 }
 
+bool32 relation_primary_key_present(
+    MappedBuffer buffer,
+    size_t tuple_fixed_size,
+    const ColumnType *types,
+    const ColumnValue *values,
+    const bool32 *primary_keys,
+    ColumnsLength tuple_length)
+{
+  assert(tuple_fixed_size > 0);
+  assert(types != NULL);
+  assert(values != NULL);
+  assert(primary_keys != NULL);
+  assert(tuple_length > 0);
+
+  RelationHeader *header = relation_header(buffer);
+
+  for (size_t i = 0; i < header->allocated_records; ++i)
+  {
+    void *tuple = relation_tuple(buffer, tuple_fixed_size, i);
+
+    bool32 matches_all = true;
+    for (ColumnsLength column = 0; column < tuple_length && matches_all;
+         ++column)
+    {
+      if (!primary_keys[column])
+      {
+        continue;
+      }
+
+      const size_t column_byte_offset =
+          tuple_column_fixed_byte_offset(types, tuple_length, column);
+      StoredValue *field = tuple + column_byte_offset;
+
+      switch (types[column])
+      {
+      case COLUMN_TYPE_INTEGER:
+        matches_all = field->integer == values[column].integer;
+        break;
+
+      case COLUMN_TYPE_BOOLEAN:
+        matches_all = field->boolean == values[column].boolean;
+        break;
+
+      case COLUMN_TYPE_STRING:
+        matches_all = string_slice_eq(
+            values[column].string,
+            (StringSlice){
+                .data = buffer.page + field->string.offset,
+                .length = field->string.length,
+            });
+        break;
+      }
+    }
+
+    if (matches_all)
+    {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 typedef enum
 {
   RELATION_INSERT_TUPLE_OK,
   RELATION_INSERT_TUPLE_SAVING,
   RELATION_INSERT_TUPLE_OPENING_BUFFER,
   RELATION_INSERT_TUPLE_BUFFER_POOL_FULL,
-  RELATION_INSERT_TUPLE_TUPLE_TOO_BIG,
+  RELATION_INSERT_TUPLE_TOO_BIG,
+  RELATION_INSERT_TUPLE_PRIMARY_KEY_VIOLATION,
 } RelationInsertTupleError;
 
 // TODO: This assumes that the column types do not change between inserts
@@ -668,11 +762,13 @@ static RelationInsertTupleError relation_insert_tuple(
     RelationId relation_id,
     const ColumnType *types,
     const ColumnValue *values,
+    const bool32 *primary_keys,
     ColumnsLength tuple_length)
 {
   assert(pool != NULL);
   assert(types != NULL);
   assert(values != NULL);
+  assert(primary_keys != NULL);
   assert(tuple_length > 0);
 
   TupleSizes tuple_sizes =
@@ -682,11 +778,13 @@ static RelationInsertTupleError relation_insert_tuple(
       tuple_sizes.fixed_size + tuple_sizes.variable_size;
 
   size_t buffer_index = 0;
+  bool32 found = false;
   enum
   {
-    RELATION_INSERT_TUPLE_STATUS_OK,
     RELATION_INSERT_TUPLE_STATUS_NEXT_BLOCK,
-    RELATION_INSERT_TUPLE_STATUS_EXPAND_FILE,
+    RELATION_INSERT_TUPLE_STATUS_NO_MORE_BLOCKS,
+    RELATION_INSERT_TUPLE_STATUS_POOL_FULL,
+    RELATION_INSERT_TUPLE_STATUS_PRIMARY_KEY_VIOLATION,
   } status = RELATION_INSERT_TUPLE_STATUS_NEXT_BLOCK;
 
   BlockIndex block = 0;
@@ -704,12 +802,28 @@ static RelationInsertTupleError relation_insert_tuple(
     {
     case DISK_BUFFER_POOL_OPEN_OK:
     {
-      if (required_space
-          <= relation_free_space(pool->buffers[buffer_index], tuple_sizes))
+      bool32 primary_key_present = relation_primary_key_present(
+          pool->buffers[result.buffer_index],
+          tuple_sizes.fixed_size,
+          types,
+          values,
+          primary_keys,
+          tuple_length);
+
+      if (primary_key_present)
       {
-        status = RELATION_INSERT_TUPLE_STATUS_OK;
+        status = RELATION_INSERT_TUPLE_STATUS_PRIMARY_KEY_VIOLATION;
       }
-      else
+
+      if (!found
+          && required_space <= relation_free_space(
+                 pool->buffers[buffer_index], tuple_sizes))
+      {
+        buffer_index = result.buffer_index;
+        found = true;
+      }
+
+      if (result.buffer_index != buffer_index)
       {
         disk_buffer_pool_close(pool, result.buffer_index);
       }
@@ -723,25 +837,42 @@ static RelationInsertTupleError relation_insert_tuple(
       continue;
 
     case DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL:
-      status = RELATION_INSERT_TUPLE_STATUS_EXPAND_FILE;
+      status = RELATION_INSERT_TUPLE_STATUS_NO_MORE_BLOCKS;
       break;
 
     case DISK_BUFFER_POOL_OPEN_BUFFER_POOL_FULL:
-      return RELATION_INSERT_TUPLE_BUFFER_POOL_FULL;
+      status = RELATION_INSERT_TUPLE_STATUS_POOL_FULL;
+      break;
     }
   }
 
   switch (status)
   {
-  case RELATION_INSERT_TUPLE_STATUS_OK:
-    break;
+  case RELATION_INSERT_TUPLE_STATUS_POOL_FULL:
+    if (found)
+    {
+      disk_buffer_pool_close(pool, buffer_index);
+    }
+    return RELATION_INSERT_TUPLE_BUFFER_POOL_FULL;
+
+  case RELATION_INSERT_TUPLE_STATUS_PRIMARY_KEY_VIOLATION:
+    if (found)
+    {
+      disk_buffer_pool_close(pool, buffer_index);
+    }
+    return RELATION_INSERT_TUPLE_PRIMARY_KEY_VIOLATION;
 
   case RELATION_INSERT_TUPLE_STATUS_NEXT_BLOCK:
     assert(false);
     break;
 
-  case RELATION_INSERT_TUPLE_STATUS_EXPAND_FILE:
+  case RELATION_INSERT_TUPLE_STATUS_NO_MORE_BLOCKS:
   {
+    if (found)
+    {
+      break;
+    }
+
     char path[LINUX_PATH_MAX];
     DiskBufferPoolNewBlockOpenResult result = disk_buffer_pool_new_block_open(
         pool,
@@ -771,7 +902,7 @@ static RelationInsertTupleError relation_insert_tuple(
         > relation_free_space(pool->buffers[buffer_index], tuple_sizes))
     {
       disk_buffer_pool_close(pool, result.buffer_index);
-      return RELATION_INSERT_TUPLE_TUPLE_TOO_BIG;
+      return RELATION_INSERT_TUPLE_TOO_BIG;
     }
   }
   break;

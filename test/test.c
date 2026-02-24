@@ -160,6 +160,12 @@ const ColumnType users_relation_types[] = {
     COLUMN_TYPE_BOOLEAN,
 };
 
+const bool32 users_relation_primary_keys[] = {
+    true,
+    false,
+    false,
+};
+
 const char *const users_relation_names[] = {
     "id",
     "email",
@@ -169,6 +175,11 @@ const char *const users_relation_names[] = {
 const ColumnType shopping_cart_relation_types[] = {
     COLUMN_TYPE_INTEGER,
     COLUMN_TYPE_STRING,
+};
+
+const bool32 shopping_cart_relation_primary_keys[] = {
+    true,
+    true,
 };
 
 const char *const shopping_cart_relation_names[] = {
@@ -193,6 +204,7 @@ static void create_users_table(Database *db)
           string_slice_from_ptr(USERS_TABLE_NAME),
           names_slice,
           users_relation_types,
+          users_relation_primary_keys,
           ARRAY_LENGTH(names_slice))
       == DATABASE_CREATE_TABLE_OK);
 }
@@ -213,6 +225,7 @@ static void create_shopping_cart_table(Database *db)
           string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
           names_slice,
           shopping_cart_relation_types,
+          shopping_cart_relation_primary_keys,
           ARRAY_LENGTH(names_slice))
       == DATABASE_CREATE_TABLE_OK);
 }
@@ -268,6 +281,39 @@ static void insert_users(Database *db)
           values3,
           ARRAY_LENGTH(users_relation_types))
       == DATABASE_INSERT_TUPLE_OK);
+}
+
+static void insert_users_primary_key_violation(Database *db)
+{
+  const ColumnValue values1[] = {
+      {.integer = 3},
+      {.string = string_slice_from_ptr("someother@company")},
+      {.boolean = (StoreBoolean) false},
+  };
+  STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values1));
+  assert(
+      database_insert_tuple(
+          db,
+          string_slice_from_ptr(USERS_TABLE_NAME),
+          users_relation_types,
+          values1,
+          ARRAY_LENGTH(users_relation_types))
+      == DATABASE_INSERT_TUPLE_OK);
+
+  const ColumnValue values2[] = {
+      {.integer = values1[0].integer},
+      {.string = string_slice_from_ptr("someotherone@company")},
+      {.boolean = (StoreBoolean) true},
+  };
+  STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values2));
+  assert(
+      database_insert_tuple(
+          db,
+          string_slice_from_ptr(USERS_TABLE_NAME),
+          users_relation_types,
+          values2,
+          ARRAY_LENGTH(users_relation_types))
+      == DATABASE_INSERT_TUPLE_PRIMARY_KEY_VIOLATION);
 }
 
 static void insert_shopping_cart_items(Database *db)
@@ -669,6 +715,10 @@ int main(int argc, char *argv[])
 
   printf("Inserting tuples\n");
   insert_users(&db);
+  dump_users_table(&db);
+
+  printf("Violating primary key\n");
+  insert_users_primary_key_violation(&db);
   dump_users_table(&db);
 
   insert_shopping_cart_items(&db);

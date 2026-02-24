@@ -161,6 +161,7 @@ static AllocateError string_from_string_slice(StringSlice slice, String *string)
 
 static void string_destroy(String *string)
 {
+  assert(string != NULL);
   assert(string->length != -1);
   deallocate(string->data, string->length);
   string->data = NULL;
