@@ -507,24 +507,15 @@ size_t relation_free_space(MappedBuffer buffer, TupleSizes tuple_sizes)
 
 typedef enum
 {
-  RELATION_INSERT_TUPLE_OK,
-  RELATION_INSERT_TUPLE_SAVING,
-  RELATION_INSERT_TUPLE_OPENING_BUFFER,
-  RELATION_INSERT_TUPLE_BUFFER_POOL_FULL,
-  RELATION_INSERT_TUPLE_TUPLE_TOO_BIG,
-} RelationInsertTupleError;
-
-typedef enum
-{
   RELATION_CREATE_OK,
   RELATION_CREATE_FAILED_TO_CREATE,
   RELATION_CREATE_FAILED_TO_STAT,
   RELATION_CREATE_ALREADY_EXISTS,
   RELATION_CREATE_PROGRAM_ERROR,
   RELATION_CREATE_FAILED_TO_WRITE,
-} DiskBufferPoolCreateRelationError;
+} RelationCreateError;
 
-static DiskBufferPoolCreateRelationError
+static RelationCreateError
 relation_create(DiskBufferPool *pool, RelationId id, bool32 expect_new)
 {
   char path[LINUX_PATH_MAX] = {};
@@ -661,6 +652,15 @@ static void relation_delete(DiskBufferPool *pool, RelationId id)
   // FIXME: Mark undeleted files to delete them later
   assert(error == LINUX_UNLINK_OK);
 }
+
+typedef enum
+{
+  RELATION_INSERT_TUPLE_OK,
+  RELATION_INSERT_TUPLE_SAVING,
+  RELATION_INSERT_TUPLE_OPENING_BUFFER,
+  RELATION_INSERT_TUPLE_BUFFER_POOL_FULL,
+  RELATION_INSERT_TUPLE_TUPLE_TOO_BIG,
+} RelationInsertTupleError;
 
 // TODO: This assumes that the column types do not change between inserts
 static RelationInsertTupleError relation_insert_tuple(
@@ -1015,9 +1015,9 @@ typedef struct
 
 typedef enum
 {
-  DISK_BUFFER_LOAD_NEXT_PAGE_OK,
-  DISK_BUFFER_LOAD_NEXT_PAGE_NO_MORE_TUPLES,
-  DISK_BUFFER_LOAD_NEXT_PAGE_LOADING_PAGE,
+  LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_OK,
+  LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_NO_MORE_TUPLES,
+  LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_LOADING_PAGE,
 } LoadNextNonEmptyRelationBlockError;
 
 typedef struct
@@ -1045,7 +1045,7 @@ static LoadNextNonEmptyRelationBlockResult load_next_non_empty_relation_block(
           > 0)
       {
         return (LoadNextNonEmptyRelationBlockResult){
-            .error = DISK_BUFFER_LOAD_NEXT_PAGE_OK,
+            .error = LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_OK,
             .block = block,
             .buffer_index = result.buffer_index,
         };
@@ -1055,14 +1055,14 @@ static LoadNextNonEmptyRelationBlockResult load_next_non_empty_relation_block(
 
     case DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL:
       return (LoadNextNonEmptyRelationBlockResult){
-          .error = DISK_BUFFER_LOAD_NEXT_PAGE_NO_MORE_TUPLES};
+          .error = LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_NO_MORE_TUPLES};
 
     case DISK_BUFFER_POOL_OPEN_OPENING_FILE:
     case DISK_BUFFER_POOL_OPEN_SEEKING_FILE:
     case DISK_BUFFER_POOL_OPEN_READING_FILE:
     case DISK_BUFFER_POOL_OPEN_BUFFER_POOL_FULL:
       return (LoadNextNonEmptyRelationBlockResult){
-          .error = DISK_BUFFER_LOAD_NEXT_PAGE_LOADING_PAGE};
+          .error = LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_LOADING_PAGE};
     }
   }
 }
@@ -1075,7 +1075,7 @@ static RelationIterator relation_iterate(DiskBufferPool *pool, RelationId id)
       load_next_non_empty_relation_block(pool, id, 0);
   switch (result.error)
   {
-  case DISK_BUFFER_LOAD_NEXT_PAGE_OK:
+  case LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_OK:
     return (RelationIterator){
         .pool = pool,
         .relation_id = id,
@@ -1084,7 +1084,7 @@ static RelationIterator relation_iterate(DiskBufferPool *pool, RelationId id)
         .status = RELATION_ITERATOR_STATUS_OK,
     };
 
-  case DISK_BUFFER_LOAD_NEXT_PAGE_NO_MORE_TUPLES:
+  case LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_NO_MORE_TUPLES:
     return (RelationIterator){
         .pool = pool,
         .relation_id = id,
@@ -1093,7 +1093,7 @@ static RelationIterator relation_iterate(DiskBufferPool *pool, RelationId id)
         .status = RELATION_ITERATOR_STATUS_NO_MORE_TUPLES,
     };
 
-  case DISK_BUFFER_LOAD_NEXT_PAGE_LOADING_PAGE:
+  case LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_LOADING_PAGE:
     return (RelationIterator){
         .pool = pool,
         .relation_id = id,
@@ -1124,7 +1124,7 @@ static void relation_iterator_next(RelationIterator *it)
 
   switch (result.error)
   {
-  case DISK_BUFFER_LOAD_NEXT_PAGE_OK:
+  case LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_OK:
     *it = (RelationIterator){
         .pool = it->pool,
         .relation_id = it->relation_id,
@@ -1134,11 +1134,11 @@ static void relation_iterator_next(RelationIterator *it)
     };
     break;
 
-  case DISK_BUFFER_LOAD_NEXT_PAGE_NO_MORE_TUPLES:
+  case LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_NO_MORE_TUPLES:
     it->status = RELATION_ITERATOR_STATUS_NO_MORE_TUPLES;
     break;
 
-  case DISK_BUFFER_LOAD_NEXT_PAGE_LOADING_PAGE:
+  case LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_LOADING_PAGE:
     it->status = RELATION_ITERATOR_STATUS_ERROR;
     break;
   }

@@ -54,7 +54,7 @@ typedef struct
   DiskBufferPool pool;
 } Database;
 
-static DiskBufferPoolCreateRelationError
+static RelationCreateError
 database_new(Database *db, StringSlice path, void *data, size_t length)
 {
   assert(db != NULL);
@@ -84,7 +84,7 @@ database_new(Database *db, StringSlice path, void *data, size_t length)
     db->pool.buffers[i] = (MappedBuffer){.status = MAPPED_BUFFER_STATUS_FREE};
   }
 
-  DiskBufferPoolCreateRelationError error =
+  RelationCreateError error =
       relation_create(&db->pool, RELATIONS_RELATION_ID, false);
   if (error != RELATION_CREATE_OK)
   {
@@ -202,8 +202,7 @@ static DatabaseCreateTableError database_create_table(
 
   assert(relation_id >= RESERVED_RELATION_IDS);
 
-  DiskBufferPoolCreateRelationError error =
-      relation_create(&db->pool, relation_id, true);
+  RelationCreateError error = relation_create(&db->pool, relation_id, true);
   if (error != RELATION_CREATE_OK)
   {
     return DATABASE_CREATE_TABLE_CREATING_FILE;
