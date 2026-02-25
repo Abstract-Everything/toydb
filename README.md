@@ -47,6 +47,8 @@ Implement some constraints on tuples inside relations
 
 - \[ \] Primary key
 - \[ \] Foreign key
+- \[ \] Unique
+- \[ \] Nullable
 
 ### Index structures
 
