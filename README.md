@@ -45,7 +45,7 @@ The goal of this project is not to even reach close to feature parity with a pro
 
 Implement some constraints on tuples inside relations
 
-- \[ \] Primary key
+- \[x\] Primary key
 - \[ \] Foreign key
 - \[ \] Unique
 - \[ \] Nullable
