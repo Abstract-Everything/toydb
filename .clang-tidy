@@ -8,3 +8,4 @@ Checks: >
   , -misc-no-recursion
   , -readability-function-cognitive-complexity
   , -readability-identifier-length
+  , -bugprone-suspicious-include

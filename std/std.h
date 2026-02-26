@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define internal static
+
 #define UNUSED(v) (v == v)
 
 #define STATIC_ASSERT(C) _Static_assert(C, "")
@@ -20,7 +22,7 @@ typedef int32_t bool32;
 const bool32 false = 0;
 const bool32 true = 1;
 
-static void assert(bool32 condition)
+internal void assert(bool32 condition)
 {
   if (!condition)
   {
@@ -36,7 +38,7 @@ typedef enum
   ALLOCATE_OUT_OF_MEMORY,
 } AllocateError;
 
-static AllocateError allocate(void **memory, size_t length)
+internal AllocateError allocate(void **memory, size_t length)
 {
   assert(memory != NULL);
   assert(*memory == NULL);
@@ -51,7 +53,7 @@ static AllocateError allocate(void **memory, size_t length)
   return ALLOCATE_OK;
 }
 
-static void deallocate(void *memory, size_t length)
+internal void deallocate(void *memory, size_t length)
 {
   UNUSED(length);
   if (memory == NULL)
@@ -63,7 +65,7 @@ static void deallocate(void *memory, size_t length)
 
 // TODO: Optimise
 // TODO Try using a macro to cover types
-static void
+internal void
 memory_copy_forward(void *destination, const void *source, size_t length)
 {
   assert(destination != NULL);
@@ -79,7 +81,7 @@ memory_copy_forward(void *destination, const void *source, size_t length)
 
 // TODO: Optimise
 // TODO Try using a macro to cover types
-static void
+internal void
 memory_copy_backward(void *destination, const void *source, size_t length)
 {
   assert(destination != NULL);
@@ -94,7 +96,7 @@ memory_copy_backward(void *destination, const void *source, size_t length)
 }
 
 // TODO: Use unsigned char instead of void
-static AllocateError reallocate_update_length(
+internal AllocateError reallocate_update_length(
     size_t object_size, void **memory, size_t *length, size_t new_length)
 {
   assert(object_size > 0);
@@ -121,7 +123,7 @@ static AllocateError reallocate_update_length(
   return ALLOCATE_OK;
 }
 
-static AllocateError
+internal AllocateError
 reallocate(size_t object_size, void **memory, size_t length, size_t new_length)
 {
   return reallocate_update_length(object_size, memory, &length, new_length);
@@ -141,7 +143,8 @@ typedef struct
   const char *data;
 } StringSlice;
 
-static AllocateError string_from_string_slice(StringSlice slice, String *string)
+internal AllocateError
+string_from_string_slice(StringSlice slice, String *string)
 {
   char *data = NULL;
   if (allocate((void **)&data, slice.length) != ALLOCATE_OK)
@@ -159,7 +162,7 @@ static AllocateError string_from_string_slice(StringSlice slice, String *string)
   return ALLOCATE_OK;
 }
 
-static void string_destroy(String *string)
+internal void string_destroy(String *string)
 {
   assert(string != NULL);
   assert(string->length != -1);
@@ -168,7 +171,7 @@ static void string_destroy(String *string)
   string->length = -1;
 }
 
-static AllocateError string_append(String *string, StringSlice slice)
+internal AllocateError string_append(String *string, StringSlice slice)
 {
   size_t old_length = string->length;
   if (reallocate_update_length(
@@ -185,7 +188,7 @@ static AllocateError string_append(String *string, StringSlice slice)
   return ALLOCATE_OK;
 }
 
-static StringSlice string_slice_from_string(String string)
+internal StringSlice string_slice_from_string(String string)
 {
   return (StringSlice){
       .data = string.data,
@@ -193,7 +196,7 @@ static StringSlice string_slice_from_string(String string)
   };
 }
 
-static StringSlice string_slice_from_ptr(const char *ptr)
+internal StringSlice string_slice_from_ptr(const char *ptr)
 {
   assert(ptr != NULL);
 
@@ -206,7 +209,7 @@ static StringSlice string_slice_from_ptr(const char *ptr)
   };
 }
 
-static bool32 string_slice_prefix_eq(StringSlice string, StringSlice prefix)
+internal bool32 string_slice_prefix_eq(StringSlice string, StringSlice prefix)
 {
   if (string.length < prefix.length)
   {
@@ -221,7 +224,7 @@ static bool32 string_slice_prefix_eq(StringSlice string, StringSlice prefix)
 
 // Returns a StringSlice past the specified character, if the character is not
 // found StringSlice.data == NULL
-static StringSlice string_slice_find_past(StringSlice string, char character)
+internal StringSlice string_slice_find_past(StringSlice string, char character)
 {
   size_t i = 0;
   for (; i < string.length && string.data[i] != character; ++i) {}
@@ -233,7 +236,7 @@ static StringSlice string_slice_find_past(StringSlice string, char character)
   };
 }
 
-static bool32 string_slice_eq(StringSlice a, StringSlice b)
+internal bool32 string_slice_eq(StringSlice a, StringSlice b)
 {
   if (a.length != b.length)
   {
@@ -246,7 +249,7 @@ static bool32 string_slice_eq(StringSlice a, StringSlice b)
   return i == a.length;
 }
 
-static size_t string_slice_concat(
+internal size_t string_slice_concat(
     char *into,
     size_t index,
     size_t length,

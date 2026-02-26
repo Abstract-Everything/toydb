@@ -4,13 +4,20 @@
 #include <stdio.h>
 #include <sys/stat.h>
 
+// include the c files to make the build simpler
+#include "parser.c"
+
+#include "logical.c"
+
+#include "physical.c"
+
 #define FILE_RETRIES 1000
 #define MAX_OPEN_BUFFERS 10
 
 #define USERS_TABLE_NAME "users"
 #define SHOPPING_CART_TABLE_NAME "shopping_cart"
 
-static void query_iterator_print(QueryIterator query_it)
+internal void query_iterator_print(QueryIterator query_it)
 {
   TupleIterator *it = query_iterator_get_output_iterator(&query_it);
   ColumnsLength tuple_length = tuple_iterator_tuple_length(it);
@@ -62,7 +69,7 @@ static void query_iterator_print(QueryIterator query_it)
   printf("\n\n");
 }
 
-static void run_query(Database *db, size_t length, QueryParameter *parameters)
+internal void run_query(Database *db, size_t length, QueryParameter *parameters)
 {
   QueryIterator it = {
       .length = 0,
@@ -73,45 +80,19 @@ static void run_query(Database *db, size_t length, QueryParameter *parameters)
   query_iterator_destroy(&it);
 }
 
-static void run_sql_query(Database *db, StringSlice query)
+internal void run_sql_query(Database *db, StringSlice query)
 {
   printf("Running SQL:\n%.*s\n\n", (int)query.length, query.data);
 
-  StringSlice *select_names = NULL;
-  size_t select_length = 0;
-  StringSlice *from_names = NULL;
-  size_t from_length = 0;
-  size_t conditions_length = 0;
-  ParsedWhereCondition *conditions = NULL;
-  size_t parameters_length = 0;
-  QueryParameter *parameters = NULL;
-  assert(
-      sql_parse_query(
-          query,
-          &select_names,
-          &select_length,
-          &from_names,
-          &from_length,
-          &conditions,
-          &conditions_length,
-          &parameters,
-          &parameters_length)
-      == SQL_PARSE_ERROR_OK);
+  SqlParseResult result = sql_parse_query(query);
+  assert(result.error == SQL_PARSE_ERROR_OK);
 
-  run_query(db, parameters_length, parameters);
+  run_query(db, result.parameters_length, result.parameters);
 
-  deallocate(select_names, sizeof(*select_names) * select_length);
-  deallocate(from_names, sizeof(*from_names) * from_length);
-  for (size_t i = 0; i < conditions_length; ++i)
-  {
-    deallocate(
-        conditions[i].conditions, sizeof(*conditions) * conditions[i].length);
-  }
-  deallocate(conditions, sizeof(*conditions) * conditions_length);
-  deallocate(parameters, sizeof(*parameters) * parameters_length);
+  deallocate_sql_parse_result(&result);
 }
 
-static void dump_relations_table(Database *db)
+internal void dump_relations_table(Database *db)
 {
   run_query(
       db,
@@ -122,7 +103,7 @@ static void dump_relations_table(Database *db)
                string_slice_from_ptr(relations_relation_name)}});
 }
 
-static void dump_relation_columns_table(Database *db)
+internal void dump_relation_columns_table(Database *db)
 {
   run_query(
       db,
@@ -133,7 +114,7 @@ static void dump_relation_columns_table(Database *db)
                string_slice_from_ptr(relation_columns_relation_name)}});
 }
 
-static void dump_users_table(Database *db)
+internal void dump_users_table(Database *db)
 {
   run_query(
       db,
@@ -143,7 +124,7 @@ static void dump_users_table(Database *db)
            .read_relation_name = string_slice_from_ptr(USERS_TABLE_NAME)}});
 }
 
-static void dump_shopping_cart_table(Database *db)
+internal void dump_shopping_cart_table(Database *db)
 {
   run_query(
       db,
@@ -187,7 +168,7 @@ const char *const shopping_cart_relation_names[] = {
     "item",
 };
 
-static void create_users_table(Database *db)
+internal void create_users_table(Database *db)
 {
   const StringSlice names_slice[] = {
       string_slice_from_ptr(users_relation_names[0]),
@@ -209,7 +190,7 @@ static void create_users_table(Database *db)
       == DATABASE_CREATE_TABLE_OK);
 }
 
-static void create_shopping_cart_table(Database *db)
+internal void create_shopping_cart_table(Database *db)
 {
   const StringSlice names_slice[] = {
       string_slice_from_ptr(shopping_cart_relation_names[0]),
@@ -230,12 +211,12 @@ static void create_shopping_cart_table(Database *db)
       == DATABASE_CREATE_TABLE_OK);
 }
 
-static void drop_table(Database *db)
+internal void drop_table(Database *db)
 {
   database_drop_table(db, string_slice_from_ptr(USERS_TABLE_NAME));
 }
 
-static void insert_users(Database *db)
+internal void insert_users(Database *db)
 {
   const ColumnValue values1[] = {
       {.integer = 0},
@@ -283,7 +264,7 @@ static void insert_users(Database *db)
       == DATABASE_INSERT_TUPLE_OK);
 }
 
-static void insert_users_primary_key_violation(Database *db)
+internal void insert_users_primary_key_violation(Database *db)
 {
   const ColumnValue values1[] = {
       {.integer = 3},
@@ -316,7 +297,7 @@ static void insert_users_primary_key_violation(Database *db)
       == DATABASE_INSERT_TUPLE_PRIMARY_KEY_VIOLATION);
 }
 
-static void insert_shopping_cart_items(Database *db)
+internal void insert_shopping_cart_items(Database *db)
 {
   const ColumnValue values1[] = {
       {.integer = 0},
@@ -409,7 +390,7 @@ static void insert_shopping_cart_items(Database *db)
       == DATABASE_INSERT_TUPLE_OK);
 }
 
-static void query_read(Database *db)
+internal void query_read(Database *db)
 {
   run_query(
       db,
@@ -420,7 +401,7 @@ static void query_read(Database *db)
       });
 }
 
-static void query_project_by_id(Database *db)
+internal void query_project_by_id(Database *db)
 {
   StringSlice project_columns[] = {
       string_slice_from_ptr(users_relation_names[0]),
@@ -441,7 +422,7 @@ static void query_project_by_id(Database *db)
   run_query(db, ARRAY_LENGTH(parameters), parameters);
 }
 
-static void query_project_by_email(Database *db)
+internal void query_project_by_email(Database *db)
 {
   StringSlice project_columns[] = {
       string_slice_from_ptr(users_relation_names[1]),
@@ -462,7 +443,7 @@ static void query_project_by_email(Database *db)
   run_query(db, ARRAY_LENGTH(parameters), parameters);
 }
 
-static void query_select_email(Database *db)
+internal void query_select_email(Database *db)
 {
   StringSlice project_columns[] = {
       string_slice_from_ptr(users_relation_names[1]),
@@ -504,7 +485,7 @@ static void query_select_email(Database *db)
   run_query(db, ARRAY_LENGTH(parameters), parameters);
 }
 
-static void query_cartesian_product(Database *db)
+internal void query_cartesian_product(Database *db)
 {
   QueryParameter parameters[] = {
       {.operator = QUERY_OPERATOR_READ,
@@ -518,7 +499,7 @@ static void query_cartesian_product(Database *db)
   run_query(db, ARRAY_LENGTH(parameters), parameters);
 }
 
-static void multi_stage_query(Database *db)
+internal void multi_stage_query(Database *db)
 {
   StringSlice project_columns[] = {
       string_slice_from_ptr(users_relation_names[0]),
@@ -571,7 +552,7 @@ static void multi_stage_query(Database *db)
   run_query(db, ARRAY_LENGTH(parameters), parameters);
 }
 
-static void delete_tuples(Database *db)
+internal void delete_tuples(Database *db)
 {
   const ColumnValue values[] = {
       {.integer = 0},
