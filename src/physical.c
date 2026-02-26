@@ -1011,15 +1011,6 @@ internal LoadNextNonEmptyRelationBlockResult load_next_non_empty_relation_block(
   }
 }
 
-struct RelationIterator
-{
-  DiskBufferPool *pool;
-  RelationId relation_id;
-  size_t buffer_index;
-  size_t tuple_index;
-  PhysicalRelationIteratorStatus status;
-};
-
 PhysicalRelationIterator
 physical_relation_iterate(DiskBufferPool *pool, RelationId id)
 {
