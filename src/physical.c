@@ -156,7 +156,7 @@ disk_buffer_pool_open(DiskBufferPool *pool, StringSlice path, BlockIndex block)
     fd = open_result.fd;
   }
 
-  if (linux_seek(fd, PAGE_SIZE * block, LINUX_SEEK_SET) != LINUX_SEEK_OK)
+  if (linux_seek(fd, PAGE_SIZE * block, LINUX_SEEK_SET).error != LINUX_SEEK_OK)
   {
     assert(linux_close(fd) == LINUX_CLOSE_OK);
     return (DiskBufferPoolOpenResult){.error =
@@ -250,7 +250,7 @@ disk_buffer_pool_new_block_open(DiskBufferPool *pool, StringSlice path)
         .error = DISK_BUFFER_POOL_NEW_BLOCK_OPEN_RESIZE_FILE};
   }
 
-  if (linux_seek(fd, PAGE_SIZE * block, LINUX_SEEK_SET) != LINUX_SEEK_OK)
+  if (linux_seek(fd, PAGE_SIZE * block, LINUX_SEEK_SET).error != LINUX_SEEK_OK)
   {
     assert(linux_close(fd) == LINUX_CLOSE_OK);
     return (DiskBufferPoolNewBlockOpenResult){
@@ -292,7 +292,7 @@ internal DiskBufferPoolSaveError
 disk_buffer_pool_save(DiskBufferPool *pool, size_t buffer_index)
 {
   MappedBuffer buffer = pool->buffers[buffer_index];
-  if (linux_seek(buffer.fd, PAGE_SIZE * buffer.block, SEEK_SET)
+  if (linux_seek(buffer.fd, PAGE_SIZE * buffer.block, SEEK_SET).error
       != LINUX_SEEK_OK)
   {
     return DISK_BUFFER_POOL_SAVE_SEEKING_FILE;

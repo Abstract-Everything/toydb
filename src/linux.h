@@ -2,6 +2,7 @@
 #define LINUX_H
 
 #define _GNU_SOURCE
+#include "std.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/limits.h>
@@ -183,33 +184,51 @@ typedef enum
   LINUX_SEEK_UNKNOWN,
 } LinuxSeekError;
 
-LinuxSeekError linux_seek(int fd, off_t offset, int whence)
+typedef struct
 {
-  if (syscall(SYS_lseek, fd, offset, whence) < 0)
+  LinuxSeekError error;
+  int64_t size;
+} LinuxSeekResult;
+
+LinuxSeekResult linux_seek(int fd, off_t offset, int whence)
+{
+  long result = syscall(SYS_lseek, fd, offset, whence) < 0;
+
+  LinuxSeekError error = LINUX_SEEK_OK;
+  if (result < 0)
   {
     switch (errno)
     {
     case EBADF:
-      return LINUX_SEEK_BAD_FD;
+      error = LINUX_SEEK_BAD_FD;
+      break;
 
     case EINVAL:
-      return LINUX_SEEK_WHENCE_INVALID;
+      error = LINUX_SEEK_WHENCE_INVALID;
+      break;
 
     case ENXIO:
-      return LINUX_SEEK_INVALID_OFFSET;
+      error = LINUX_SEEK_INVALID_OFFSET;
+      break;
 
     case EOVERFLOW:
-      return LINUX_SEEK_FILE_OFFSET_TOO_BIG;
+      error = LINUX_SEEK_FILE_OFFSET_TOO_BIG;
+      break;
 
     case ESPIPE:
-      return LINUX_SEEK_NOT_A_FILE;
+      error = LINUX_SEEK_NOT_A_FILE;
+      break;
 
     default:
-      return LINUX_SEEK_UNKNOWN;
+      error = LINUX_SEEK_UNKNOWN;
+      break;
     }
   }
 
-  return LINUX_SEEK_OK;
+  return (LinuxSeekResult){
+      .error = error,
+      .size = result,
+  };
 }
 
 typedef enum
