@@ -26,7 +26,7 @@ void disk_buffer_pool_new(
 
 // ----- Disk buffer pool -----
 
-// ----- Relation -----
+// ----- Physical Relation -----
 
 typedef int64_t RelationId;
 
@@ -83,36 +83,30 @@ typedef union
 
 typedef enum
 {
-  RELATION_CREATE_OK,
-  RELATION_CREATE_FAILED_TO_CREATE,
-  RELATION_CREATE_FAILED_TO_STAT,
-  RELATION_CREATE_ALREADY_EXISTS,
-  RELATION_CREATE_PROGRAM_ERROR,
-  RELATION_CREATE_FAILED_TO_WRITE,
-  RELATION_CREATE_NO_PRIMARY_KEY,
-} RelationCreateError;
+  PHYSICAL_RELATION_CREATE_OK,
+  PHYSICAL_RELATION_CREATE_FAILED_TO_CREATE,
+  PHYSICAL_RELATION_CREATE_FAILED_TO_STAT,
+  PHYSICAL_RELATION_CREATE_ALREADY_EXISTS,
+  PHYSICAL_RELATION_CREATE_PROGRAM_ERROR,
+  PHYSICAL_RELATION_CREATE_FAILED_TO_WRITE,
+} PhysicalRelationCreateError;
 
-RelationCreateError relation_create(
-    DiskBufferPool *pool,
-    RelationId id,
-    const bool32 *primary_keys,
-    ColumnsLength tuple_length,
-    bool32 expect_new);
+PhysicalRelationCreateError physical_relation_create(
+    DiskBufferPool *pool, RelationId id, bool32 expect_new);
 
-void relation_delete(DiskBufferPool *pool, RelationId id);
+void physical_relation_delete(DiskBufferPool *pool, RelationId id);
 
 typedef enum
 {
-  RELATION_INSERT_TUPLE_OK,
-  RELATION_INSERT_TUPLE_SAVING,
-  RELATION_INSERT_TUPLE_OPENING_BUFFER,
-  RELATION_INSERT_TUPLE_BUFFER_POOL_FULL,
-  RELATION_INSERT_TUPLE_TOO_BIG,
-  RELATION_INSERT_TUPLE_PRIMARY_KEY_VIOLATION,
-} RelationInsertTupleError;
+  PHYSICAL_RELATION_INSERT_TUPLE_OK,
+  PHYSICAL_RELATION_INSERT_TUPLE_SAVING,
+  PHYSICAL_RELATION_INSERT_TUPLE_OPENING_BUFFER,
+  PHYSICAL_RELATION_INSERT_TUPLE_BUFFER_POOL_FULL,
+  PHYSICAL_RELATION_INSERT_TUPLE_TOO_BIG,
+} PhysicalRelationInsertTupleError;
 
 // TODO: This assumes that the column types do not change between inserts
-RelationInsertTupleError relation_insert_tuple(
+PhysicalRelationInsertTupleError physical_relation_insert_tuple(
     DiskBufferPool *pool,
     RelationId relation_id,
     const ColumnType *types,
@@ -120,7 +114,14 @@ RelationInsertTupleError relation_insert_tuple(
     const bool32 *primary_keys,
     ColumnsLength tuple_length);
 
-void relation_delete_tuples(
+typedef enum
+{
+  PHYSICAL_RELATION_DELETE_TUPLES_OK,
+  PHYSICAL_RELATION_DELETE_TUPLES_READING,
+  PHYSICAL_RELATION_DELETE_TUPLES_BUFFER_POOL_FULL,
+} PhysicalRelationDeleteTuplesError;
+
+PhysicalRelationDeleteTuplesError physical_relation_delete_tuples(
     DiskBufferPool *pool,
     RelationId relation_id,
     const ColumnType *types,
@@ -130,10 +131,10 @@ void relation_delete_tuples(
 
 typedef enum
 {
-  RELATION_ITERATOR_STATUS_OK,
-  RELATION_ITERATOR_STATUS_NO_MORE_TUPLES,
-  RELATION_ITERATOR_STATUS_ERROR,
-} RelationIteratorStatus;
+  PHYSICAL_RELATION_ITERATOR_STATUS_OK,
+  PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_TUPLES,
+  PHYSICAL_RELATION_ITERATOR_STATUS_ERROR,
+} PhysicalRelationIteratorStatus;
 
 typedef struct
 {
@@ -141,22 +142,23 @@ typedef struct
   RelationId relation_id;
   size_t buffer_index;
   size_t tuple_index;
-  RelationIteratorStatus status;
-} RelationIterator;
+  PhysicalRelationIteratorStatus status;
+} PhysicalRelationIterator;
 
-RelationIterator relation_iterate(DiskBufferPool *pool, RelationId id);
+PhysicalRelationIterator
+physical_relation_iterate(DiskBufferPool *pool, RelationId id);
 
-void relation_iterator_next(RelationIterator *it);
+void physical_relation_iterator_next(PhysicalRelationIterator *it);
 
-ColumnValue relation_iterator_get(
-    RelationIterator *it,
+ColumnValue physical_relation_iterator_get(
+    PhysicalRelationIterator *it,
     const ColumnType *types,
     ColumnsLength tuple_length,
     ColumnsLength column_index);
 
-void relation_iterator_close(RelationIterator *it);
+void physical_relation_iterator_close(PhysicalRelationIterator *it);
 
-// ----- Relation -----
+// ----- Physical Relation -----
 
 #define PHYSICAL_H
 #endif

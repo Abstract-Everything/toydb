@@ -1,4 +1,4 @@
-#include "logical.h"
+#include "database.h"
 #include "parser.h"
 #include <fcntl.h>
 #include <stdio.h>
@@ -6,6 +6,8 @@
 
 // include the c files to make the build simpler
 #include "parser.c"
+
+#include "database.c"
 
 #include "logical.c"
 
@@ -34,7 +36,7 @@ internal void query_iterator_print(QueryIterator query_it)
 
   printf("\n---------\n");
 
-  for (; tuple_iterator_valid(it) == RELATION_ITERATOR_STATUS_OK;
+  for (; tuple_iterator_valid(it) == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
        tuple_iterator_next(it))
   {
     for (ColumnsLength column = 0; column < tuple_length; ++column)
@@ -64,7 +66,9 @@ internal void query_iterator_print(QueryIterator query_it)
     printf("\n");
   }
 
-  assert(tuple_iterator_valid(it) == RELATION_ITERATOR_STATUS_NO_MORE_TUPLES);
+  assert(
+      tuple_iterator_valid(it)
+      == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_TUPLES);
 
   printf("\n\n");
 }
@@ -75,7 +79,9 @@ internal void run_query(Database *db, size_t length, QueryParameter *parameters)
       .length = 0,
       .iterators = NULL,
   };
-  assert(database_query(db, length, parameters, &it) == DATABASE_QUERY_OK);
+  assert(
+      query_iterator_new(&db->pool, length, parameters, &it)
+      == QUERY_ITERATOR_OK);
   query_iterator_print(it);
   query_iterator_destroy(&it);
 }
@@ -187,7 +193,7 @@ internal void create_users_table(Database *db)
           users_relation_types,
           users_relation_primary_keys,
           ARRAY_LENGTH(names_slice))
-      == DATABASE_CREATE_TABLE_OK);
+      == LOGICAL_RELATION_CREATE_OK);
 }
 
 internal void create_shopping_cart_table(Database *db)
@@ -208,7 +214,7 @@ internal void create_shopping_cart_table(Database *db)
           shopping_cart_relation_types,
           shopping_cart_relation_primary_keys,
           ARRAY_LENGTH(names_slice))
-      == DATABASE_CREATE_TABLE_OK);
+      == LOGICAL_RELATION_CREATE_OK);
 }
 
 internal void drop_table(Database *db)
@@ -231,7 +237,7 @@ internal void insert_users(Database *db)
           users_relation_types,
           values1,
           ARRAY_LENGTH(users_relation_types))
-      == DATABASE_INSERT_TUPLE_OK);
+      == LOGICAL_RELATION_INSERT_TUPLE_OK);
 
   const ColumnValue values2[] = {
       {.integer = 1},
@@ -246,7 +252,7 @@ internal void insert_users(Database *db)
           users_relation_types,
           values2,
           ARRAY_LENGTH(users_relation_types))
-      == DATABASE_INSERT_TUPLE_OK);
+      == LOGICAL_RELATION_INSERT_TUPLE_OK);
 
   const ColumnValue values3[] = {
       {.integer = 2},
@@ -261,7 +267,7 @@ internal void insert_users(Database *db)
           users_relation_types,
           values3,
           ARRAY_LENGTH(users_relation_types))
-      == DATABASE_INSERT_TUPLE_OK);
+      == LOGICAL_RELATION_INSERT_TUPLE_OK);
 }
 
 internal void insert_users_primary_key_violation(Database *db)
@@ -279,7 +285,7 @@ internal void insert_users_primary_key_violation(Database *db)
           users_relation_types,
           values1,
           ARRAY_LENGTH(users_relation_types))
-      == DATABASE_INSERT_TUPLE_OK);
+      == LOGICAL_RELATION_INSERT_TUPLE_OK);
 
   const ColumnValue values2[] = {
       {.integer = values1[0].integer},
@@ -294,7 +300,7 @@ internal void insert_users_primary_key_violation(Database *db)
           users_relation_types,
           values2,
           ARRAY_LENGTH(users_relation_types))
-      == DATABASE_INSERT_TUPLE_PRIMARY_KEY_VIOLATION);
+      == LOGICAL_RELATION_INSERT_TUPLE_PRIMARY_KEY_VIOLATION);
 }
 
 internal void insert_shopping_cart_items(Database *db)
@@ -312,7 +318,7 @@ internal void insert_shopping_cart_items(Database *db)
           shopping_cart_relation_types,
           values1,
           ARRAY_LENGTH(values1))
-      == DATABASE_INSERT_TUPLE_OK);
+      == LOGICAL_RELATION_INSERT_TUPLE_OK);
 
   const ColumnValue values2[] = {
       {.integer = 0},
@@ -327,7 +333,7 @@ internal void insert_shopping_cart_items(Database *db)
           shopping_cart_relation_types,
           values2,
           ARRAY_LENGTH(values2))
-      == DATABASE_INSERT_TUPLE_OK);
+      == LOGICAL_RELATION_INSERT_TUPLE_OK);
 
   const ColumnValue values3[] = {
       {.integer = 0},
@@ -342,7 +348,7 @@ internal void insert_shopping_cart_items(Database *db)
           shopping_cart_relation_types,
           values3,
           ARRAY_LENGTH(values3))
-      == DATABASE_INSERT_TUPLE_OK);
+      == LOGICAL_RELATION_INSERT_TUPLE_OK);
 
   const ColumnValue values4[] = {
       {.integer = 1},
@@ -357,7 +363,7 @@ internal void insert_shopping_cart_items(Database *db)
           shopping_cart_relation_types,
           values4,
           ARRAY_LENGTH(values4))
-      == DATABASE_INSERT_TUPLE_OK);
+      == LOGICAL_RELATION_INSERT_TUPLE_OK);
 
   const ColumnValue values5[] = {
       {.integer = 2},
@@ -372,7 +378,7 @@ internal void insert_shopping_cart_items(Database *db)
           shopping_cart_relation_types,
           values5,
           ARRAY_LENGTH(values5))
-      == DATABASE_INSERT_TUPLE_OK);
+      == LOGICAL_RELATION_INSERT_TUPLE_OK);
 
   const ColumnValue values6[] = {
       {.integer = 2},
@@ -387,7 +393,7 @@ internal void insert_shopping_cart_items(Database *db)
           shopping_cart_relation_types,
           values6,
           ARRAY_LENGTH(values6))
-      == DATABASE_INSERT_TUPLE_OK);
+      == LOGICAL_RELATION_INSERT_TUPLE_OK);
 }
 
 internal void query_read(Database *db)
@@ -567,7 +573,7 @@ internal void delete_tuples(Database *db)
           0,
           COLUMN_TYPE_INTEGER,
           (ColumnValue){.integer = 0})
-      == DATABASE_DELETE_TUPLES_OK);
+      == LOGICAL_RELATION_DELETE_TUPLES_OK);
 }
 
 void sql_select_star(Database *db)
@@ -679,9 +685,7 @@ int main(int argc, char *argv[])
             S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH)
         == 0);
 
-    assert(
-        database_new(&db, string_slice_from_ptr(path), data, memory_length)
-        == RELATION_CREATE_OK);
+    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
   }
 
   printf("Creating users table\n");

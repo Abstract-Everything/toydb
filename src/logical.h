@@ -3,78 +3,76 @@
 #include "physical.h"
 #include "std.h"
 
-struct Database;
-typedef struct Database Database;
+// ----- Logical Relation -----
 
-RelationCreateError
-database_new(Database *db, StringSlice path, void *data, size_t length);
+bool32 relation_create_schema_relations(DiskBufferPool *pool);
 
 typedef enum
 {
-  DATABASE_CREATE_TABLE_OK,
-  DATABASE_CREATE_TABLE_OUT_OF_MEMORY,
-  DATABASE_CREATE_TABLE_NO_SPACE,
-  DATABASE_CREATE_TABLE_READING_DISK,
-  DATABASE_CREATE_TABLE_CREATING_FILE,
-  DATABASE_CREATE_TABLE_REALTION_ALREADY_EXISTS,
-} DatabaseCreateTableError;
+  LOGICAL_RELATION_CREATE_OK,
+  LOGICAL_RELATION_CREATE_IO,
+  LOGICAL_RELATION_CREATE_NO_PRIMARY_KEY,
+  LOGICAL_RELATION_CREATE_ALREADY_EXISTS,
+  LOGICAL_RELATION_CREATE_PROGRAM_ERROR,
+} LogicalRelationCreateError;
 
-// TODO: Check that column names are unique
-DatabaseCreateTableError database_create_table(
-    Database *db,
-    StringSlice name,
+LogicalRelationCreateError logical_relation_create(
+    DiskBufferPool *pool,
+    StringSlice relation_names,
     StringSlice const *names,
     ColumnType const *types,
     bool32 const *primary_keys,
-    ColumnsLength length);
+    ColumnsLength tuple_length);
 
 typedef enum
 {
-  DATABASE_DROP_TABLE_OK,
-  DATABASE_DROP_TABLE_OUT_OF_MEMORY,
-  DATABASE_DROP_TABLE_NOT_FOUND,
-  DATABASE_DROP_TABLE_READING_DISK,
-} DatabaseDropTableError;
+  LOGICAL_RELATION_DROP_OK,
+  LOGICAL_RELATION_DROP_OUT_OF_MEMORY,
+  LOGICAL_RELATION_DROP_NOT_FOUND,
+  LOGICAL_RELATION_DROP_IO,
+} LogicalRelationDropError;
 
-DatabaseDropTableError database_drop_table(Database *db, StringSlice name);
+LogicalRelationDropError
+logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name);
 
 typedef enum
 {
-  DATABASE_INSERT_TUPLE_OK,
-  DATABASE_INSERT_TUPLE_OUT_OF_MEMORY,
-  DATABASE_INSERT_TUPLE_COLUMN_TYPE_MISMATCH,
-  DATABASE_INSERT_TUPLE_COLUMNS_LENGTH_MISMATCH,
-  DATABASE_INSERT_TUPLE_RELATION_NOT_FOUND,
-  DATABASE_INSERT_TUPLE_READING_DISK,
-  DATABASE_INSERT_TUPLE_PRIMARY_KEY_VIOLATION,
-  DATABASE_INSERT_TUPLE_TOO_BIG,
-} DatabaseInsertTupleError;
+  LOGICAL_RELATION_INSERT_TUPLE_OK,
+  LOGICAL_RELATION_INSERT_TUPLE_OUT_OF_MEMORY,
+  LOGICAL_RELATION_INSERT_TUPLE_NOT_FOUND,
+  LOGICAL_RELATION_INSERT_TUPLE_IO,
+  LOGICAL_RELATION_INSERT_TUPLE_TUPLE_LENGTH_MISMATCH,
+  LOGICAL_RELATION_INSERT_TUPLE_COLUMN_TYPE_MISMATCH,
+  LOGICAL_RELATION_INSERT_TUPLE_TOO_BIG,
+  LOGICAL_RELATION_INSERT_TUPLE_PRIMARY_KEY_VIOLATION,
+} LogicalRelationInsertTupleError;
 
-// TODO: Take relation as argument
-DatabaseInsertTupleError database_insert_tuple(
-    Database *db,
-    StringSlice name,
+LogicalRelationInsertTupleError logical_relation_insert_tuple(
+    DiskBufferPool *pool,
+    StringSlice relation_name,
     const ColumnType *types,
     const ColumnValue *values,
-    int16_t length);
+    ColumnsLength tuple_length);
 
 typedef enum
 {
-  DATABASE_DELETE_TUPLES_OK,
-  DATABASE_DELETE_TUPLES_OUT_OF_MEMORY,
-  DATABASE_DELETE_TUPLES_COLUMN_INDEX_OUT_OF_RANGE,
-  DATABASE_DELETE_TUPLES_COLUMN_TYPE_MISMATCH,
-  DATABASE_DELETE_TUPLES_RELATION_NOT_FOUND,
-  DATABASE_DELETE_TUPLES_READING_DISK,
-} DatabaseDeleteTuplesError;
+  LOGICAL_RELATION_DELETE_TUPLES_OK,
+  LOGICAL_RELATION_DELETE_TUPLES_OUT_OF_MEMORY,
+  LOGICAL_RELATION_DELETE_TUPLES_NOT_FOUND,
+  LOGICAL_RELATION_DELETE_TUPLES_IO,
+  LOGICAL_RELATION_DELETE_TUPLES_TUPLE_LENGTH_MISMATCH,
+  LOGICAL_RELATION_DELETE_TUPLES_COLUMN_TYPE_MISMATCH,
+} LogicalRelationDeleteTuplesError;
 
-DatabaseDeleteTuplesError database_delete_tuples(
-    Database *db,
-    StringSlice name,
+LogicalRelationDeleteTuplesError logical_relation_delete_tuples(
+    DiskBufferPool *pool,
+    StringSlice relation_name,
     // TDOO: take column name instead of index
     ColumnsLength column_index,
     ColumnType type,
     ColumnValue value);
+
+// ----- Logical Relation -----
 
 // ----- Query -----
 
@@ -166,7 +164,7 @@ typedef struct TupleIterator TupleIterator;
 
 ColumnsLength tuple_iterator_tuple_length(TupleIterator *it);
 
-RelationIteratorStatus tuple_iterator_valid(TupleIterator *it);
+PhysicalRelationIteratorStatus tuple_iterator_valid(TupleIterator *it);
 
 StringSlice
 tuple_iterator_column_name(TupleIterator *it, ColumnsLength column_id);
@@ -187,16 +185,16 @@ typedef struct
 
 typedef enum
 {
-  DATABASE_QUERY_OK,
-  DATABASE_QUERY_OUT_OF_MEMORY,
-  DATABASE_QUERY_RELATION_NOT_FOUND,
-  DATABASE_QUERY_COLUMN_NOT_FOUND,
-  DATABASE_QUERY_OPERATOR_TYPE_MISMATCH,
-  DATABASE_QUERY_READING_DISK,
-} DatabaseQueryError;
+  QUERY_ITERATOR_OK,
+  QUERY_ITERATOR_OUT_OF_MEMORY,
+  QUERY_ITERATOR_RELATION_NOT_FOUND,
+  QUERY_ITERATOR_COLUMN_NOT_FOUND,
+  QUERY_ITERATOR_OPERATOR_TYPE_MISMATCH,
+  QUERY_ITERATOR_READING_DISK,
+} QueryIteratorError;
 
-DatabaseQueryError database_query(
-    Database *db,
+QueryIteratorError query_iterator_new(
+    DiskBufferPool *pool,
     size_t length,
     const QueryParameter *parameters,
     QueryIterator *it);
