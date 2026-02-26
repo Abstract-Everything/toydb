@@ -532,6 +532,7 @@ bool32 relation_create_schema_relations(DiskBufferPool *pool)
       relation_columns_primary_keys,
       ARRAY_LENGTH(relation_columns_primary_keys)));
 
+  // TODO: Use logical_relation_create or a subset of it to enforce checks
   PhysicalRelationCreateError error =
       physical_relation_create(pool, RELATIONS_RELATION_ID, false);
   switch (error)
@@ -546,6 +547,8 @@ bool32 relation_create_schema_relations(DiskBufferPool *pool)
   case PHYSICAL_RELATION_CREATE_FAILED_TO_WRITE:
     return false;
   }
+
+  // TODO: Use logical_relation_create or a subset of it to enforce checks
   error = physical_relation_create(pool, RELATION_COLUMNS_RELATION_ID, false);
   switch (error)
   {
@@ -641,6 +644,8 @@ LogicalRelationCreateError logical_relation_create(
         ARRAY_LENGTH(relation_column_values)
         == ARRAY_LENGTH(relation_columns_types));
 
+    // TODO: Use logical_relation_insert_tuple or a subset of it to enforce
+    // checks
     insert_error = physical_relation_insert_tuple(
         pool,
         RELATION_COLUMNS_RELATION_ID,
@@ -659,6 +664,7 @@ LogicalRelationCreateError logical_relation_create(
     STATIC_ASSERT(
         ARRAY_LENGTH(relations_values) == ARRAY_LENGTH(relations_types));
 
+    // TODO: Use logical_relation_insert_tuple or a subset of it to enforce
     insert_error = physical_relation_insert_tuple(
         pool,
         RELATIONS_RELATION_ID,
@@ -694,6 +700,7 @@ logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name)
     return LOGICAL_RELATION_DROP_NOT_FOUND;
   }
 
+  // TODO: Use logical_relation_delete_tuples or a subset of it to enforce
   PhysicalRelationDeleteTuplesError error = physical_relation_delete_tuples(
       pool,
       RELATION_COLUMNS_RELATION_ID,
@@ -705,6 +712,7 @@ logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name)
   // TODO: Use transactions to handle failure
   assert(error == PHYSICAL_RELATION_DELETE_TUPLES_OK);
 
+  // TODO: Use logical_relation_delete_tuples or a subset of it to enforce
   error = physical_relation_delete_tuples(
       pool,
       RELATIONS_RELATION_ID,
