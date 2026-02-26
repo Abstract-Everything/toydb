@@ -551,7 +551,9 @@ static RelationCreateError relation_create(
   char path[LINUX_PATH_MAX] = {};
   relation_id_to_path(pool->save_path, id, path, ARRAY_LENGTH(path));
   LinuxOpenResult open_result = linux_open(
-      path, O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+      path,
+      (expect_new ? O_EXCL : 0) | O_CREAT | O_WRONLY,
+      S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
   switch (open_result.error)
   {
   case LINUX_OPEN_OK:
@@ -577,7 +579,7 @@ static RelationCreateError relation_create(
     return RELATION_CREATE_FAILED_TO_CREATE;
 
   case LINUX_OPEN_ALREADY_EXISTS:
-    return RELATION_CREATE_ALREADY_EXISTS;
+    return expect_new ? RELATION_CREATE_ALREADY_EXISTS : RELATION_CREATE_OK;
 
   case LINUX_OPEN_PATH_SEG_FAULT:
   case LINUX_OPEN_PATH_FILE_TOO_BIG:
