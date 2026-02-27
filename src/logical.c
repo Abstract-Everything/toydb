@@ -603,12 +603,6 @@ LogicalRelationCreateError logical_relation_create(
 
   assert(result.relation_id >= RESERVED_RELATION_IDS);
 
-  assert(pool != NULL);
-  assert(names != NULL);
-  assert(types != NULL);
-  assert(primary_keys != NULL);
-  assert(tuple_length > 0);
-
   if (!has_at_least_one_primary_key(primary_keys, tuple_length))
   {
     return LOGICAL_RELATION_CREATE_NO_PRIMARY_KEY;
