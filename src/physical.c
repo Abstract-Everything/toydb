@@ -952,6 +952,22 @@ PhysicalRelationDeleteTuplesError physical_relation_delete_tuples(
         tuple_index++;
       }
     }
+
+    DiskBufferPoolSaveError save_error =
+        disk_buffer_pool_save(pool, result.buffer_index);
+
+    disk_buffer_pool_close(pool, result.buffer_index);
+
+    switch (save_error)
+    {
+    case DISK_BUFFER_POOL_SAVE_OK:
+      break;
+
+    case DISK_BUFFER_POOL_SAVE_SEEKING_FILE:
+    case DISK_BUFFER_POOL_SAVE_WRITING_FILE:
+    case DISK_BUFFER_POOL_SAVE_SYNC:
+      return PHYSICAL_RELATION_DELETE_TUPLES_WRITING;
+    }
   }
 
   return PHYSICAL_RELATION_DELETE_TUPLES_OK;
