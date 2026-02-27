@@ -24,6 +24,17 @@ typedef struct
 void disk_buffer_pool_new(
     DiskBufferPool *pool, StringSlice path, void *data, size_t length);
 
+typedef enum
+{
+  DISK_RESOURCE_CREATE_OK,
+  DISK_RESOURCE_CREATE_OPENING,
+  DISK_RESOURCE_CREATE_STAT,
+  DISK_RESOURCE_CREATE_ALREADY_EXISTS,
+  DISK_RESOURCE_CREATE_PROGRAM_ERROR,
+  DISK_RESOURCE_CREATE_TRUNCATING,
+  DISK_RESOURCE_CREATE_CLOSING,
+} DiskResourceCreate;
+
 // ----- Disk buffer pool -----
 
 // ----- Physical Relation -----
@@ -81,17 +92,7 @@ typedef union
   MemorySlice string;
 } ColumnValue2;
 
-typedef enum
-{
-  PHYSICAL_RELATION_CREATE_OK,
-  PHYSICAL_RELATION_CREATE_FAILED_TO_CREATE,
-  PHYSICAL_RELATION_CREATE_FAILED_TO_STAT,
-  PHYSICAL_RELATION_CREATE_ALREADY_EXISTS,
-  PHYSICAL_RELATION_CREATE_PROGRAM_ERROR,
-  PHYSICAL_RELATION_CREATE_FAILED_TO_WRITE,
-} PhysicalRelationCreateError;
-
-PhysicalRelationCreateError physical_relation_create(
+DiskResourceCreate physical_relation_create(
     DiskBufferPool *pool, RelationId id, bool32 expect_new);
 
 void physical_relation_delete(DiskBufferPool *pool, RelationId id);

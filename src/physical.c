@@ -4,6 +4,26 @@
 
 // ----- Disk buffer pool -----
 
+typedef enum
+{
+  RESOURCE_TYPE_RELATION,
+} DiskResourceType;
+
+typedef struct
+{
+  DiskResourceType type;
+  union
+  {
+    RelationId relation_id;
+  };
+} DiskResource;
+
+internal DiskResourceCreate disk_buffer_pool_resource_create(
+    DiskBufferPool *pool, DiskResource resource, bool32 expect_new);
+
+internal void
+disk_buffer_pool_resource_delete(DiskBufferPool *pool, DiskResource resource);
+
 internal void disk_buffer_pool_close(DiskBufferPool *pool, size_t buffer_index);
 
 typedef enum
@@ -22,8 +42,8 @@ typedef struct
   DiskBufferPoolOpenError error;
 } DiskBufferPoolOpenResult;
 
-internal DiskBufferPoolOpenResult
-disk_buffer_pool_open(DiskBufferPool *pool, StringSlice path, BlockIndex block);
+internal DiskBufferPoolOpenResult disk_buffer_pool_open(
+    DiskBufferPool *pool, DiskResource resource, BlockIndex block);
 
 typedef enum
 {
@@ -42,8 +62,8 @@ typedef struct
   DiskBufferPoolNewBlockOpenError error;
 } DiskBufferPoolNewBlockOpenResult;
 
-internal DiskBufferPoolNewBlockOpenResult
-disk_buffer_pool_new_block_open(DiskBufferPool *pool, StringSlice path);
+internal DiskBufferPoolNewBlockOpenResult disk_buffer_pool_new_block_open(
+    DiskBufferPool *pool, DiskResource resource, void *data, size_t length);
 
 typedef enum
 {
@@ -66,42 +86,6 @@ BlockIndex mapped_buffer_block(MappedBuffer *buffer);
 // ----- Disk buffer pool -----
 
 // ----- Relation -----
-
-internal StringSlice relation_id_to_path(
-    StringSlice save_path, RelationId relation_id, char *path, size_t length)
-{
-  size_t index = string_slice_concat(path, 0, length, save_path, false);
-  index = string_slice_concat(
-      path, index, length, string_slice_from_ptr("/"), false);
-
-  size_t start_index = index;
-  if (relation_id == 0)
-  {
-    path[index++] = '0';
-  }
-
-  // TODO: Simplify
-  const RelationId base = 10;
-  for (RelationId id = relation_id; id > 0; id /= base, ++index)
-  {
-    path[index] = (char)('0' + (id % base));
-  }
-  size_t end_index = index - 1;
-
-  while (start_index < end_index)
-  {
-    char temp = path[start_index];
-    path[start_index] = path[end_index];
-    path[end_index] = temp;
-    start_index += 1;
-    end_index -= 1;
-  }
-
-  index = string_slice_concat(
-      path, index, length, string_slice_from_ptr(".relation"), true);
-
-  return (StringSlice){.data = path, .length = index};
-}
 
 internal size_t column_type_fixed_size(ColumnType type)
 {
@@ -212,147 +196,20 @@ relation_free_space(MappedBuffer *buffer, TupleSizes tuple_sizes)
          - (tuple_sizes.fixed_size * header->allocated_records);
 }
 
-PhysicalRelationCreateError
+DiskResourceCreate
 physical_relation_create(DiskBufferPool *pool, RelationId id, bool32 expect_new)
 {
   assert(pool != NULL);
-
-  char path[LINUX_PATH_MAX] = {};
-  relation_id_to_path(pool->save_path, id, path, ARRAY_LENGTH(path));
-  LinuxOpenResult open_result = linux_open(
-      path,
-      (expect_new ? O_EXCL : 0) | O_CREAT | O_WRONLY,
-      S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
-  switch (open_result.error)
-  {
-  case LINUX_OPEN_OK:
-    break;
-
-  case LINUX_OPEN_ACCESS:
-  case LINUX_OPEN_BUSY:
-  case LINUX_OPEN_QUOTA:
-  case LINUX_OPEN_INTERRUPT:
-  case LINUX_OPEN_TOO_MANY_SYMBOLIC_LINKS:
-  case LINUX_OPEN_TOO_MANY_FD_OPEN:
-  case LINUX_OPEN_SYSTEM_OPEN_FILE_LIMIT:
-  case LINUX_OPEN_NO_DEVICE:
-  case LINUX_OPEN_NO_MEMORY:
-  case LINUX_OPEN_NO_SPACE_ON_DEVICE:
-  case LINUX_OPEN_NOT_DIRECTORY:
-  case LINUX_OPEN_NO_DEVICE_OR_ADDRESS:
-  case LINUX_OPEN_OPERATION_NOT_SUPPORTED:
-  case LINUX_OPEN_PERMISSIONS:
-  case LINUX_OPEN_READ_ONLY_FILESYSTEM:
-  case LINUX_OPEN_FILE_BUSY:
-  case LINUX_OPEN_WOULD_BLOCK:
-    return PHYSICAL_RELATION_CREATE_FAILED_TO_CREATE;
-
-  case LINUX_OPEN_ALREADY_EXISTS:
-    return expect_new ? PHYSICAL_RELATION_CREATE_ALREADY_EXISTS
-                      : PHYSICAL_RELATION_CREATE_OK;
-
-  case LINUX_OPEN_PATH_SEG_FAULT:
-  case LINUX_OPEN_PATH_FILE_TOO_BIG:
-  case LINUX_OPEN_FLAGS_MISUSE:
-  case LINUX_OPEN_IS_DIRECTORY:
-  case LINUX_OPEN_PATH_TOO_LONG:
-  case LINUX_OPEN_NOT_FOUND:
-  case LINUX_OPEN_UNKNOWN:
-    return PHYSICAL_RELATION_CREATE_PROGRAM_ERROR;
-  }
-
-  if (!expect_new)
-  {
-    LinuxFStatResult result = linux_fstat(open_result.fd);
-    if (result.error != LINUX_FSTAT_OK)
-    {
-      linux_close(open_result.fd);
-      return PHYSICAL_RELATION_CREATE_FAILED_TO_STAT;
-    }
-
-    if (result.stat.st_size > 0)
-    {
-      linux_close(open_result.fd);
-      return PHYSICAL_RELATION_CREATE_OK;
-    }
-  }
-
-  RelationHeader header = (RelationHeader){
-      .allocated_records = 0,
-      .variable_data_start = PAGE_SIZE,
-  };
-
-  LinuxWriteResult write_result =
-      linux_write(open_result.fd, (void *)&header, PAGE_SIZE);
-  switch (write_result.error)
-  {
-  case LINUX_WRITE_OK:
-    assert(write_result.count == PAGE_SIZE);
-    break;
-
-  case LINUX_WRITE_WOULD_BLOCK:
-  case LINUX_WRITE_QUOTA:
-  case LINUX_WRITE_INTERRUPT:
-  case LINUX_WRITE_INVALID:
-  case LINUX_WRITE_IO:
-  case LINUX_WRITE_NO_SPACE:
-  case LINUX_WRITE_PERMISSIONS:
-  case LINUX_WRITE_PIPE_CLOSED:
-    linux_close(open_result.fd);
-    return PHYSICAL_RELATION_CREATE_FAILED_TO_WRITE;
-
-  case LINUX_WRITE_BAD_FD:
-  case LINUX_WRITE_BUFFER_SEG_FAULT:
-  case LINUX_WRITE_INVALID_PEER_ADDRESS:
-  case LINUX_WRITE_LENGTH_TOO_BIG:
-  case LINUX_WRITE_UNKNOWN:
-    linux_close(open_result.fd);
-    return PHYSICAL_RELATION_CREATE_PROGRAM_ERROR;
-  }
-
-  switch (linux_fdatasync(open_result.fd))
-  {
-  case LINUX_FDATASYNC_OK:
-    break;
-
-  case LINUX_FDATASYNC_BAD_FD:
-  case LINUX_FDATASYNC_FD_NO_SYNC_SUPPORT:
-  case LINUX_FDATASYNC_UNKNOWN:
-    linux_close(open_result.fd);
-    return PHYSICAL_RELATION_CREATE_PROGRAM_ERROR;
-
-  case LINUX_FDATASYNC_INTERRUPT:
-  case LINUX_FDATASYNC_IO:
-  case LINUX_FDATASYNC_NO_SPACE:
-  case LINUX_FDATASYNC_READ_ONLY_FILESYSTEM:
-  case LINUX_FDATASYNC_QUOTA:
-    linux_close(open_result.fd);
-    return PHYSICAL_RELATION_CREATE_FAILED_TO_WRITE;
-  }
-
-  switch (linux_close(open_result.fd))
-  {
-  case LINUX_CLOSE_OK:
-    return PHYSICAL_RELATION_CREATE_OK;
-
-  case LINUX_CLOSE_BAD_FD:
-    return PHYSICAL_RELATION_CREATE_PROGRAM_ERROR;
-
-  case LINUX_CLOSE_INTERRUPT:
-  case LINUX_CLOSE_IO:
-  case LINUX_CLOSE_QUOTA:
-  case LINUX_CLOSE_UNKNOWN:
-    return PHYSICAL_RELATION_CREATE_FAILED_TO_WRITE;
-  }
+  return disk_buffer_pool_resource_create(
+      pool,
+      (DiskResource){.type = RESOURCE_TYPE_RELATION, .relation_id = id},
+      expect_new);
 }
 
 void physical_relation_delete(DiskBufferPool *pool, RelationId id)
 {
-  char path[LINUX_PATH_MAX] = {};
-  relation_id_to_path(pool->save_path, id, path, ARRAY_LENGTH(path));
-  LinuxUnlinkError error = linux_unlink(path);
-  // FIXME: Mark undeleted files to delete them later
-  assert(error == LINUX_UNLINK_OK);
+  disk_buffer_pool_resource_delete(
+      pool, (DiskResource){.type = RESOURCE_TYPE_RELATION, .relation_id = id});
 }
 
 // TODO: This assumes that the column types do not change between inserts
@@ -388,10 +245,10 @@ PhysicalRelationInsertTupleError physical_relation_insert_tuple(
   BlockIndex block = 0;
   for (block = 0; status == INSERT_TUPLE_STATUS_NEXT_BLOCK; ++block)
   {
-    char path[LINUX_PATH_MAX];
     DiskBufferPoolOpenResult result = disk_buffer_pool_open(
         pool,
-        relation_id_to_path(pool->save_path, relation_id, path, LINUX_PATH_MAX),
+        (DiskResource){.type = RESOURCE_TYPE_RELATION,
+                       .relation_id = relation_id},
         block);
 
     buffer_index = result.buffer_index;
@@ -443,11 +300,17 @@ PhysicalRelationInsertTupleError physical_relation_insert_tuple(
 
   case INSERT_TUPLE_STATUS_NO_MORE_BLOCKS:
   {
-    char path[LINUX_PATH_MAX];
+    RelationHeader init_header = (RelationHeader){
+        .allocated_records = 0,
+        .variable_data_start = PAGE_SIZE,
+    };
+
     DiskBufferPoolNewBlockOpenResult result = disk_buffer_pool_new_block_open(
         pool,
-        relation_id_to_path(
-            pool->save_path, relation_id, path, LINUX_PATH_MAX));
+        (DiskResource){.type = RESOURCE_TYPE_RELATION,
+                       .relation_id = relation_id},
+        &init_header,
+        sizeof(init_header));
 
     switch (result.error)
     {
@@ -567,10 +430,10 @@ PhysicalRelationDeleteTuplesError physical_relation_delete_tuples(
 
   for (BlockIndex block = 0;; ++block)
   {
-    char path[LINUX_PATH_MAX];
     DiskBufferPoolOpenResult result = disk_buffer_pool_open(
         pool,
-        relation_id_to_path(pool->save_path, relation_id, path, LINUX_PATH_MAX),
+        (DiskResource){.type = RESOURCE_TYPE_RELATION,
+                       .relation_id = relation_id},
         block);
 
     // Can't use break to break out of the loop from inside the switch, so we
@@ -738,10 +601,9 @@ internal LoadNextNonEmptyRelationBlockResult load_next_non_empty_relation_block(
 {
   for (;; ++block)
   {
-    char path[LINUX_PATH_MAX];
     DiskBufferPoolOpenResult result = disk_buffer_pool_open(
         pool,
-        relation_id_to_path(pool->save_path, id, path, LINUX_PATH_MAX),
+        (DiskResource){.type = RESOURCE_TYPE_RELATION, .relation_id = id},
         block);
 
     switch (result.error)
@@ -932,6 +794,170 @@ struct MappedBuffer
   void *page;
 };
 
+internal StringSlice resource_to_path(
+    StringSlice save_path, DiskResource resource, char *path, size_t length)
+{
+  size_t index = string_slice_concat(path, 0, length, save_path, false);
+  index = string_slice_concat(
+      path, index, length, string_slice_from_ptr("/"), false);
+
+  switch (resource.type)
+  {
+  case RESOURCE_TYPE_RELATION:
+  {
+    size_t start_index = index;
+    if (resource.relation_id == 0)
+    {
+      path[index++] = '0';
+    }
+
+    // TODO: Simplify
+    const RelationId base = 10;
+    for (RelationId id = resource.relation_id; id > 0; id /= base, ++index)
+    {
+      path[index] = (char)('0' + (id % base));
+    }
+    size_t end_index = index - 1;
+
+    while (start_index < end_index)
+    {
+      char temp = path[start_index];
+      path[start_index] = path[end_index];
+      path[end_index] = temp;
+      start_index += 1;
+      end_index -= 1;
+    }
+
+    index = string_slice_concat(
+        path, index, length, string_slice_from_ptr(".relation"), true);
+  }
+  break;
+  }
+
+  return (StringSlice){.data = path, .length = index};
+}
+
+internal DiskResourceCreate disk_buffer_pool_resource_create(
+    DiskBufferPool *pool, DiskResource resource, bool32 expect_new)
+{
+  assert(pool != NULL);
+
+  char path[LINUX_PATH_MAX] = {};
+  resource_to_path(pool->save_path, resource, path, ARRAY_LENGTH(path));
+
+  LinuxOpenResult open_result = linux_open(
+      path,
+      (expect_new ? O_EXCL : 0) | O_CREAT | O_WRONLY,
+      S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+
+  switch (open_result.error)
+  {
+  case LINUX_OPEN_OK:
+    break;
+
+  case LINUX_OPEN_ACCESS:
+  case LINUX_OPEN_BUSY:
+  case LINUX_OPEN_QUOTA:
+  case LINUX_OPEN_INTERRUPT:
+  case LINUX_OPEN_TOO_MANY_SYMBOLIC_LINKS:
+  case LINUX_OPEN_TOO_MANY_FD_OPEN:
+  case LINUX_OPEN_SYSTEM_OPEN_FILE_LIMIT:
+  case LINUX_OPEN_NO_DEVICE:
+  case LINUX_OPEN_NO_MEMORY:
+  case LINUX_OPEN_NO_SPACE_ON_DEVICE:
+  case LINUX_OPEN_NOT_DIRECTORY:
+  case LINUX_OPEN_NO_DEVICE_OR_ADDRESS:
+  case LINUX_OPEN_OPERATION_NOT_SUPPORTED:
+  case LINUX_OPEN_PERMISSIONS:
+  case LINUX_OPEN_READ_ONLY_FILESYSTEM:
+  case LINUX_OPEN_FILE_BUSY:
+  case LINUX_OPEN_WOULD_BLOCK:
+    return DISK_RESOURCE_CREATE_OPENING;
+
+  case LINUX_OPEN_ALREADY_EXISTS:
+    return expect_new ? DISK_RESOURCE_CREATE_ALREADY_EXISTS
+                      : DISK_RESOURCE_CREATE_OK;
+
+  case LINUX_OPEN_PATH_SEG_FAULT:
+  case LINUX_OPEN_PATH_FILE_TOO_BIG:
+  case LINUX_OPEN_FLAGS_MISUSE:
+  case LINUX_OPEN_IS_DIRECTORY:
+  case LINUX_OPEN_PATH_TOO_LONG:
+  case LINUX_OPEN_NOT_FOUND:
+  case LINUX_OPEN_UNKNOWN:
+    return DISK_RESOURCE_CREATE_PROGRAM_ERROR;
+  }
+
+  if (!expect_new)
+  {
+    LinuxFStatResult result = linux_fstat(open_result.fd);
+    if (result.error != LINUX_FSTAT_OK)
+    {
+      linux_close(open_result.fd);
+      return DISK_RESOURCE_CREATE_STAT;
+    }
+
+    if (result.stat.st_size > 0)
+    {
+      linux_close(open_result.fd);
+      return DISK_RESOURCE_CREATE_OK;
+    }
+  }
+
+  switch (linux_ftruncate(open_result.fd, 0))
+  {
+  case LINUX_FTRUNCATE_OK:
+    break;
+
+  case LINUX_FTRUNCATE_ACCESS:
+  case LINUX_FTRUNCATE_INTERRUPT:
+  case LINUX_FTRUNCATE_IO:
+  case LINUX_FTRUNCATE_TOO_MANY_SYMBOLIC_LINKS:
+  case LINUX_FTRUNCATE_PERMISSIONS:
+  case LINUX_FTRUNCATE_READ_ONLY_FILESYSTEM:
+  case LINUX_FTRUNCATE_BUSY:
+    return DISK_RESOURCE_CREATE_TRUNCATING;
+
+  case LINUX_FTRUNCATE_PATH_SEG_FAULT:
+  case LINUX_FTRUNCATE_LENGTH_INVALID:
+  case LINUX_FTRUNCATE_LENGTH_OR_FD_INVALID:
+  case LINUX_FTRUNCATE_IS_DIRECTORY:
+  case LINUX_FTRUNCATE_PATH_TOO_LONG:
+  case LINUX_FTRUNCATE_FILE_NOT_FOUND:
+  case LINUX_FTRUNCATE_INVALID_PATH:
+  case LINUX_FTRUNCATE_BAD_FD:
+    return DISK_RESOURCE_CREATE_PROGRAM_ERROR;
+
+  case LINUX_FTRUNCATE_UNKNOWN:
+    break;
+  }
+
+  switch (linux_close(open_result.fd))
+  {
+  case LINUX_CLOSE_OK:
+    return DISK_RESOURCE_CREATE_OK;
+
+  case LINUX_CLOSE_BAD_FD:
+    return DISK_RESOURCE_CREATE_PROGRAM_ERROR;
+
+  case LINUX_CLOSE_INTERRUPT:
+  case LINUX_CLOSE_IO:
+  case LINUX_CLOSE_QUOTA:
+  case LINUX_CLOSE_UNKNOWN:
+    return DISK_RESOURCE_CREATE_CLOSING;
+  }
+}
+
+internal void
+disk_buffer_pool_resource_delete(DiskBufferPool *pool, DiskResource resource)
+{
+  char path[LINUX_PATH_MAX] = {};
+  resource_to_path(pool->save_path, resource, path, ARRAY_LENGTH(path));
+
+  LinuxUnlinkError error = linux_unlink(path);
+  // FIXME: Log any failures
+}
+
 void disk_buffer_pool_new(
     DiskBufferPool *pool, StringSlice path, void *data, size_t length)
 {
@@ -1022,8 +1048,8 @@ disk_buffer_pool_find_free_buffer(DiskBufferPool *pool)
   };
 }
 
-internal DiskBufferPoolOpenResult
-disk_buffer_pool_open(DiskBufferPool *pool, StringSlice path, BlockIndex block)
+internal DiskBufferPoolOpenResult disk_buffer_pool_open(
+    DiskBufferPool *pool, DiskResource resource, BlockIndex block)
 {
   DiskBufferPoolFindFreeBufferResult free_buffer_result =
       disk_buffer_pool_find_free_buffer(pool);
@@ -1038,8 +1064,13 @@ disk_buffer_pool_open(DiskBufferPool *pool, StringSlice path, BlockIndex block)
 
   int fd = 0;
   {
+    // TODO: We don't need this much space
+    char path[LINUX_PATH_MAX] = {};
+    resource_to_path(pool->save_path, resource, path, ARRAY_LENGTH(path));
+
     LinuxOpenResult open_result =
-        linux_open(path.data, LINUX_OPEN_DIRECT | LINUX_OPEN_READ_WRITE, 0);
+        linux_open(path, LINUX_OPEN_DIRECT | LINUX_OPEN_READ_WRITE, 0);
+
     if (open_result.error != LINUX_OPEN_OK)
     {
       return (DiskBufferPoolOpenResult){.error =
@@ -1083,8 +1114,8 @@ disk_buffer_pool_open(DiskBufferPool *pool, StringSlice path, BlockIndex block)
   };
 }
 
-internal DiskBufferPoolNewBlockOpenResult
-disk_buffer_pool_new_block_open(DiskBufferPool *pool, StringSlice path)
+internal DiskBufferPoolNewBlockOpenResult disk_buffer_pool_new_block_open(
+    DiskBufferPool *pool, DiskResource resource, void *data, size_t length)
 {
   DiskBufferPoolFindFreeBufferResult free_buffer_result =
       disk_buffer_pool_find_free_buffer(pool);
@@ -1099,8 +1130,12 @@ disk_buffer_pool_new_block_open(DiskBufferPool *pool, StringSlice path)
 
   int fd = 0;
   {
+    // TODO: We don't need this much space
+    char path[LINUX_PATH_MAX] = {};
+    resource_to_path(pool->save_path, resource, path, ARRAY_LENGTH(path));
+
     LinuxOpenResult open_result =
-        linux_open(path.data, LINUX_OPEN_DIRECT | LINUX_OPEN_READ_WRITE, 0);
+        linux_open(path, LINUX_OPEN_DIRECT | LINUX_OPEN_READ_WRITE, 0);
     if (open_result.error != LINUX_OPEN_OK)
     {
       return (DiskBufferPoolNewBlockOpenResult){
@@ -1118,8 +1153,8 @@ disk_buffer_pool_new_block_open(DiskBufferPool *pool, StringSlice path)
 
   assert((result.stat.st_size % PAGE_SIZE) == 0);
 
-  size_t block = (result.stat.st_size / PAGE_SIZE) + 1;
-  if (linux_ftruncate(fd, PAGE_SIZE * block) != LINUX_FTRUNCATE_OK)
+  size_t block = (result.stat.st_size / PAGE_SIZE);
+  if (linux_ftruncate(fd, PAGE_SIZE * (block + 1)) != LINUX_FTRUNCATE_OK)
   {
     return (DiskBufferPoolNewBlockOpenResult){
         .error = DISK_BUFFER_POOL_NEW_BLOCK_OPEN_RESIZE_FILE};
@@ -1141,6 +1176,8 @@ disk_buffer_pool_new_block_open(DiskBufferPool *pool, StringSlice path)
   }
 
   assert(read_result.count == PAGE_SIZE);
+
+  memory_copy_forward(page, data, length);
 
   pool->buffers[free_buffer_result.index] = (MappedBuffer){
       .status = MAPPED_BUFFER_STATUS_USED,
