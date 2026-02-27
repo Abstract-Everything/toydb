@@ -100,3 +100,4 @@ Analyse the structure of the relational operators in order to determine whether 
 Example:
 
 - \[ \] Move Select operators before Cartesian Products in order to combine less tuples
+- \[ \] Implement join operation, which terminates relation search if matching primary key
