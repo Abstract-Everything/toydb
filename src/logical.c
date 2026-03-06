@@ -79,6 +79,8 @@ typedef struct
 internal QueryRelationIdByNameResult
 query_relation_id_by_name(DiskBufferPool *pool, StringSlice name)
 {
+  RelationId relation_id = 0;
+
   PhysicalRelationIterator i;
   for (i = physical_relation_iterate(pool, RELATIONS_RELATION_ID);
        i.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
@@ -86,22 +88,21 @@ query_relation_id_by_name(DiskBufferPool *pool, StringSlice name)
   {
     ColumnValue tuple_name = physical_relation_iterator_get(
         &i, relations_types, ARRAY_LENGTH(relations_types), 1);
+
     if (string_slice_eq(name, tuple_name.string))
     {
       ColumnValue tuple_id = physical_relation_iterator_get(
           &i, relations_types, ARRAY_LENGTH(relations_types), 0);
 
-      physical_relation_iterator_close(&i);
-      return (QueryRelationIdByNameResult){
-          .status = PHYSICAL_RELATION_ITERATOR_STATUS_OK,
-          .relation_id = tuple_id.integer,
-      };
+      relation_id = tuple_id.integer;
+      break;
     }
   }
   physical_relation_iterator_close(&i);
 
   return (QueryRelationIdByNameResult){
       .status = i.status,
+      .relation_id = relation_id,
   };
 }
 
