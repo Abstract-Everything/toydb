@@ -21,19 +21,14 @@ LogicalRelationCreateError database_create_table(
 LogicalRelationDropError
 database_drop_table(Database *db, StringSlice relation_name);
 
-LogicalRelationInsertTupleError database_insert_tuple(
-    Database *db,
-    StringSlice relation_name,
-    const ColumnType *types,
-    const ColumnValue *values,
-    ColumnsLength tuple_length);
+LogicalRelationInsertTupleError
+database_insert_tuple(Database *db, StringSlice relation_name, Tuple tuple);
 
 LogicalRelationDeleteTuplesError database_delete_tuples(
     Database *db,
     StringSlice relation_name,
-    ColumnsLength column_index,
-    ColumnType type,
-    ColumnValue value);
+    ColumnsLength *column_indices,
+    Tuple tuple);
 
 // ----- Database -----
 

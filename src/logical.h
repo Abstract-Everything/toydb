@@ -48,11 +48,7 @@ typedef enum
 } LogicalRelationInsertTupleError;
 
 LogicalRelationInsertTupleError logical_relation_insert_tuple(
-    DiskBufferPool *pool,
-    StringSlice relation_name,
-    const ColumnType *types,
-    const ColumnValue *values,
-    ColumnsLength tuple_length);
+    DiskBufferPool *pool, StringSlice relation_name, Tuple tuple);
 
 typedef enum
 {
@@ -62,15 +58,15 @@ typedef enum
   LOGICAL_RELATION_DELETE_TUPLES_IO,
   LOGICAL_RELATION_DELETE_TUPLES_TUPLE_LENGTH_MISMATCH,
   LOGICAL_RELATION_DELETE_TUPLES_COLUMN_TYPE_MISMATCH,
+  LOGICAL_RELATION_DELETE_TUPLES_DUPLICATE_COLUMN_INDICES,
 } LogicalRelationDeleteTuplesError;
 
 LogicalRelationDeleteTuplesError logical_relation_delete_tuples(
     DiskBufferPool *pool,
     StringSlice relation_name,
     // TDOO: take column name instead of index
-    ColumnsLength column_index,
-    ColumnType type,
-    ColumnValue value);
+    ColumnsLength *column_indices,
+    Tuple tuple);
 
 // ----- Logical Relation -----
 

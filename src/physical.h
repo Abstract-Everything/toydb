@@ -45,6 +45,7 @@ typedef int64_t RelationId;
 typedef int16_t ColumnsLength;
 
 // ----- Store types -----
+
 typedef int64_t StoreInteger;
 
 typedef int8_t StoreBoolean;
@@ -61,6 +62,7 @@ typedef union
   StoreBoolean boolean;
   StoreString string;
 } StoredValue;
+
 // ----- Store types -----
 
 typedef enum
@@ -85,12 +87,31 @@ typedef union
   StringSlice string;
 } ColumnValue;
 
-// TODO: Merge this and ColumnValue
-typedef union
+typedef struct
 {
-  MemoryInteger integer;
-  MemorySlice string;
-} ColumnValue2;
+  ColumnsLength length;
+  const ColumnType *types;
+  const void *fixed_data;
+  const void *variable_data;
+} Tuple;
+
+int16_t tuple_data_length(
+    ColumnsLength tuple_length,
+    const ColumnType *types,
+    const ColumnValue *values);
+
+Tuple tuple_from_data(
+    ColumnsLength tuple_length,
+    const ColumnType *types,
+    size_t data_length,
+    void *data,
+    const ColumnValue *values);
+
+ColumnValue tuple_get(Tuple tuple, ColumnsLength index);
+
+StoreInteger tuple_get_integer(Tuple tuple, ColumnsLength index);
+StoreBoolean tuple_get_boolean(Tuple tuple, ColumnsLength index);
+StringSlice tuple_get_string(Tuple tuple, ColumnsLength index);
 
 DiskResourceCreate physical_relation_create(
     DiskBufferPool *pool, RelationId id, bool32 expect_new);
@@ -110,10 +131,8 @@ typedef enum
 PhysicalRelationInsertTupleError physical_relation_insert_tuple(
     DiskBufferPool *pool,
     RelationId relation_id,
-    const ColumnType *types,
-    const ColumnValue *values,
     const bool32 *primary_keys,
-    ColumnsLength tuple_length);
+    Tuple tuple);
 
 typedef enum
 {
@@ -126,10 +145,10 @@ typedef enum
 PhysicalRelationDeleteTuplesError physical_relation_delete_tuples(
     DiskBufferPool *pool,
     RelationId relation_id,
-    const ColumnType *types,
     ColumnsLength tuple_length,
-    ColumnsLength column_index,
-    ColumnValue value);
+    const ColumnType *types,
+    const ColumnsLength *tuple_column_indices,
+    Tuple tuple);
 
 typedef enum
 {
@@ -143,7 +162,7 @@ typedef struct
   DiskBufferPool *pool;
   RelationId relation_id;
   size_t buffer_index;
-  size_t tuple_index;
+  int16_t tuple_index;
   PhysicalRelationIteratorStatus status;
 } PhysicalRelationIterator;
 
@@ -152,11 +171,10 @@ physical_relation_iterate(DiskBufferPool *pool, RelationId id);
 
 void physical_relation_iterator_next(PhysicalRelationIterator *it);
 
-ColumnValue physical_relation_iterator_get(
+Tuple physical_relation_iterator_get(
     PhysicalRelationIterator *it,
     const ColumnType *types,
-    ColumnsLength tuple_length,
-    ColumnsLength column_index);
+    ColumnsLength tuple_length);
 
 void physical_relation_iterator_close(PhysicalRelationIterator *it);
 

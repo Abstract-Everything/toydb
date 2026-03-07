@@ -19,6 +19,42 @@
 #define USERS_TABLE_NAME "users"
 #define SHOPPING_CART_TABLE_NAME "shopping_cart"
 
+void expect_database_insert_tuple(
+    LogicalRelationInsertTupleError error,
+    Database *db,
+    StringSlice relation_name,
+    const ColumnType *types,
+    const ColumnValue *values,
+    ColumnsLength tuple_length)
+{
+  // TODO: Use arena allocator
+  size_t data_length = tuple_data_length(tuple_length, types, values);
+  char data[data_length] = {};
+
+  assert(
+      database_insert_tuple(
+          db,
+          relation_name,
+          tuple_from_data(tuple_length, types, data_length, data, values))
+      == error);
+}
+
+void assert_database_insert_tuple(
+    Database *db,
+    StringSlice relation_name,
+    const ColumnType *types,
+    const ColumnValue *values,
+    ColumnsLength tuple_length)
+{
+  expect_database_insert_tuple(
+      LOGICAL_RELATION_INSERT_TUPLE_OK,
+      db,
+      relation_name,
+      types,
+      values,
+      tuple_length);
+}
+
 internal void query_iterator_print(QueryIterator query_it)
 {
   TupleIterator *it = query_iterator_get_output_iterator(&query_it);
@@ -230,14 +266,12 @@ internal void insert_users(Database *db)
       {.boolean = (StoreBoolean) false},
   };
   STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values1));
-  assert(
-      database_insert_tuple(
-          db,
-          string_slice_from_ptr(USERS_TABLE_NAME),
-          users_relation_types,
-          values1,
-          ARRAY_LENGTH(users_relation_types))
-      == LOGICAL_RELATION_INSERT_TUPLE_OK);
+  assert_database_insert_tuple(
+      db,
+      string_slice_from_ptr(USERS_TABLE_NAME),
+      users_relation_types,
+      values1,
+      ARRAY_LENGTH(users_relation_types));
 
   const ColumnValue values2[] = {
       {.integer = 1},
@@ -245,14 +279,12 @@ internal void insert_users(Database *db)
       {.boolean = (StoreBoolean) true},
   };
   STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values2));
-  assert(
-      database_insert_tuple(
-          db,
-          string_slice_from_ptr(USERS_TABLE_NAME),
-          users_relation_types,
-          values2,
-          ARRAY_LENGTH(users_relation_types))
-      == LOGICAL_RELATION_INSERT_TUPLE_OK);
+  assert_database_insert_tuple(
+      db,
+      string_slice_from_ptr(USERS_TABLE_NAME),
+      users_relation_types,
+      values2,
+      ARRAY_LENGTH(users_relation_types));
 
   const ColumnValue values3[] = {
       {.integer = 2},
@@ -260,14 +292,12 @@ internal void insert_users(Database *db)
       {.boolean = (StoreBoolean) false},
   };
   STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values3));
-  assert(
-      database_insert_tuple(
-          db,
-          string_slice_from_ptr(USERS_TABLE_NAME),
-          users_relation_types,
-          values3,
-          ARRAY_LENGTH(users_relation_types))
-      == LOGICAL_RELATION_INSERT_TUPLE_OK);
+  assert_database_insert_tuple(
+      db,
+      string_slice_from_ptr(USERS_TABLE_NAME),
+      users_relation_types,
+      values3,
+      ARRAY_LENGTH(users_relation_types));
 }
 
 internal void insert_users_primary_key_violation(Database *db)
@@ -278,14 +308,12 @@ internal void insert_users_primary_key_violation(Database *db)
       {.boolean = (StoreBoolean) false},
   };
   STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values1));
-  assert(
-      database_insert_tuple(
-          db,
-          string_slice_from_ptr(USERS_TABLE_NAME),
-          users_relation_types,
-          values1,
-          ARRAY_LENGTH(users_relation_types))
-      == LOGICAL_RELATION_INSERT_TUPLE_OK);
+  assert_database_insert_tuple(
+      db,
+      string_slice_from_ptr(USERS_TABLE_NAME),
+      users_relation_types,
+      values1,
+      ARRAY_LENGTH(users_relation_types));
 
   const ColumnValue values2[] = {
       {.integer = values1[0].integer},
@@ -293,14 +321,13 @@ internal void insert_users_primary_key_violation(Database *db)
       {.boolean = (StoreBoolean) true},
   };
   STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values2));
-  assert(
-      database_insert_tuple(
-          db,
-          string_slice_from_ptr(USERS_TABLE_NAME),
-          users_relation_types,
-          values2,
-          ARRAY_LENGTH(users_relation_types))
-      == LOGICAL_RELATION_INSERT_TUPLE_PRIMARY_KEY_VIOLATION);
+  expect_database_insert_tuple(
+      LOGICAL_RELATION_INSERT_TUPLE_PRIMARY_KEY_VIOLATION,
+      db,
+      string_slice_from_ptr(USERS_TABLE_NAME),
+      users_relation_types,
+      values2,
+      ARRAY_LENGTH(users_relation_types));
 }
 
 internal void insert_shopping_cart_items(Database *db)
@@ -311,14 +338,12 @@ internal void insert_shopping_cart_items(Database *db)
   };
   STATIC_ASSERT(
       ARRAY_LENGTH(shopping_cart_relation_types) == ARRAY_LENGTH(values1));
-  assert(
-      database_insert_tuple(
-          db,
-          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
-          shopping_cart_relation_types,
-          values1,
-          ARRAY_LENGTH(values1))
-      == LOGICAL_RELATION_INSERT_TUPLE_OK);
+  assert_database_insert_tuple(
+      db,
+      string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+      shopping_cart_relation_types,
+      values1,
+      ARRAY_LENGTH(values1));
 
   const ColumnValue values2[] = {
       {.integer = 0},
@@ -326,14 +351,12 @@ internal void insert_shopping_cart_items(Database *db)
   };
   STATIC_ASSERT(
       ARRAY_LENGTH(shopping_cart_relation_types) == ARRAY_LENGTH(values2));
-  assert(
-      database_insert_tuple(
-          db,
-          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
-          shopping_cart_relation_types,
-          values2,
-          ARRAY_LENGTH(values2))
-      == LOGICAL_RELATION_INSERT_TUPLE_OK);
+  assert_database_insert_tuple(
+      db,
+      string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+      shopping_cart_relation_types,
+      values2,
+      ARRAY_LENGTH(values2));
 
   const ColumnValue values3[] = {
       {.integer = 0},
@@ -341,14 +364,12 @@ internal void insert_shopping_cart_items(Database *db)
   };
   STATIC_ASSERT(
       ARRAY_LENGTH(shopping_cart_relation_types) == ARRAY_LENGTH(values3));
-  assert(
-      database_insert_tuple(
-          db,
-          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
-          shopping_cart_relation_types,
-          values3,
-          ARRAY_LENGTH(values3))
-      == LOGICAL_RELATION_INSERT_TUPLE_OK);
+  assert_database_insert_tuple(
+      db,
+      string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+      shopping_cart_relation_types,
+      values3,
+      ARRAY_LENGTH(values3));
 
   const ColumnValue values4[] = {
       {.integer = 1},
@@ -356,14 +377,12 @@ internal void insert_shopping_cart_items(Database *db)
   };
   STATIC_ASSERT(
       ARRAY_LENGTH(shopping_cart_relation_types) == ARRAY_LENGTH(values4));
-  assert(
-      database_insert_tuple(
-          db,
-          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
-          shopping_cart_relation_types,
-          values4,
-          ARRAY_LENGTH(values4))
-      == LOGICAL_RELATION_INSERT_TUPLE_OK);
+  assert_database_insert_tuple(
+      db,
+      string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+      shopping_cart_relation_types,
+      values4,
+      ARRAY_LENGTH(values4));
 
   const ColumnValue values5[] = {
       {.integer = 2},
@@ -371,14 +390,12 @@ internal void insert_shopping_cart_items(Database *db)
   };
   STATIC_ASSERT(
       ARRAY_LENGTH(shopping_cart_relation_types) == ARRAY_LENGTH(values5));
-  assert(
-      database_insert_tuple(
-          db,
-          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
-          shopping_cart_relation_types,
-          values5,
-          ARRAY_LENGTH(values5))
-      == LOGICAL_RELATION_INSERT_TUPLE_OK);
+  assert_database_insert_tuple(
+      db,
+      string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+      shopping_cart_relation_types,
+      values5,
+      ARRAY_LENGTH(values5));
 
   const ColumnValue values6[] = {
       {.integer = 2},
@@ -386,14 +403,12 @@ internal void insert_shopping_cart_items(Database *db)
   };
   STATIC_ASSERT(
       ARRAY_LENGTH(shopping_cart_relation_types) == ARRAY_LENGTH(values6));
-  assert(
-      database_insert_tuple(
-          db,
-          string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
-          shopping_cart_relation_types,
-          values6,
-          ARRAY_LENGTH(values6))
-      == LOGICAL_RELATION_INSERT_TUPLE_OK);
+  assert_database_insert_tuple(
+      db,
+      string_slice_from_ptr(SHOPPING_CART_TABLE_NAME),
+      shopping_cart_relation_types,
+      values6,
+      ARRAY_LENGTH(values6));
 }
 
 internal void query_read(Database *db)
@@ -560,19 +575,21 @@ internal void multi_stage_query(Database *db)
 
 internal void delete_tuples(Database *db)
 {
-  const ColumnValue values[] = {
-      {.integer = 0},
-      {.string = string_slice_from_ptr("user@company")},
-      {.boolean = (StoreBoolean) false},
-  };
-  STATIC_ASSERT(ARRAY_LENGTH(users_relation_types) == ARRAY_LENGTH(values));
+  ColumnsLength tuple_length = 1;
+  int16_t column_index = 0;
+  ColumnType type = COLUMN_TYPE_INTEGER;
+  ColumnValue value = {.integer = 0};
+
+  // TODO: Use arena allocator
+  size_t data_length = tuple_data_length(tuple_length, &type, &value);
+  char data[data_length] = {};
+
   assert(
       database_delete_tuples(
           db,
           string_slice_from_ptr(USERS_TABLE_NAME),
-          0,
-          COLUMN_TYPE_INTEGER,
-          (ColumnValue){.integer = 0})
+          &column_index,
+          tuple_from_data(tuple_length, &type, data_length, data, &value))
       == LOGICAL_RELATION_DELETE_TUPLES_OK);
 }
 

@@ -34,24 +34,18 @@ database_drop_table(Database *db, StringSlice relation_name)
   return logical_relation_drop(&db->pool, relation_name);
 }
 
-LogicalRelationInsertTupleError database_insert_tuple(
-    Database *db,
-    StringSlice relation_name,
-    const ColumnType *types,
-    const ColumnValue *values,
-    ColumnsLength tuple_length)
+LogicalRelationInsertTupleError
+database_insert_tuple(Database *db, StringSlice relation_name, Tuple tuple)
 {
-  return logical_relation_insert_tuple(
-      &db->pool, relation_name, types, values, tuple_length);
+  return logical_relation_insert_tuple(&db->pool, relation_name, tuple);
 }
 
 LogicalRelationDeleteTuplesError database_delete_tuples(
     Database *db,
     StringSlice relation_name,
-    ColumnsLength column_index,
-    ColumnType type,
-    ColumnValue value)
+    ColumnsLength *column_indices,
+    Tuple tuple)
 {
   return logical_relation_delete_tuples(
-      &db->pool, relation_name, column_index, type, value);
+      &db->pool, relation_name, column_indices, tuple);
 }
