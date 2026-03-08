@@ -153,15 +153,12 @@ column_value_eq(ColumnType type, ColumnValue lhs, ColumnValue rhs)
   {
   case COLUMN_TYPE_INTEGER:
     return lhs.integer == rhs.integer;
-    break;
 
   case COLUMN_TYPE_BOOLEAN:
     return lhs.boolean == rhs.boolean;
-    break;
 
   case COLUMN_TYPE_STRING:
     return string_slice_eq(lhs.string, rhs.string);
-    break;
   }
 }
 
@@ -193,6 +190,7 @@ internal int16_t tuple_values_variable_length(
 
     case COLUMN_TYPE_STRING:
       size += values[i].string.length;
+      break;
     }
   }
   return size;
@@ -295,29 +293,35 @@ Tuple tuple_from_data(
   };
 }
 
-ColumnValue tuple_get(Tuple tuple, ColumnsLength index)
+internal StoredValue tuple_get_raw(Tuple tuple, ColumnsLength index)
 {
   assert(index < tuple.length);
 
   const StoredValue *value =
       tuple.fixed_data + column_byte_offset(tuple.length, tuple.types, index);
+  return *value;
+}
+
+ColumnValue tuple_get(Tuple tuple, ColumnsLength index)
+{
+  const StoredValue value = tuple_get_raw(tuple, index);
 
   switch (tuple.types[index])
   {
   case COLUMN_TYPE_INTEGER:
-    return (ColumnValue){.integer = value->integer};
+    return (ColumnValue){.integer = value.integer};
 
   case COLUMN_TYPE_STRING:
     return (ColumnValue){
         .string =
             (StringSlice){
-                .length = value->string.length,
-                .data = tuple.variable_data + value->string.offset,
+                .length = value.string.length,
+                .data = tuple.variable_data + value.string.offset,
             },
     };
 
   case COLUMN_TYPE_BOOLEAN:
-    return (ColumnValue){.boolean = value->boolean};
+    return (ColumnValue){.boolean = value.boolean};
   }
 }
 
@@ -345,34 +349,52 @@ typedef struct
   int16_t variable_data_start;
 } RelationHeader;
 
+typedef struct
+{
+  int16_t variable_data_start;
+} TupleHeader;
+
 internal const RelationHeader *relation_header_read(MappedBuffer *buffer)
 {
   return mapped_buffer_read(buffer);
 }
 
-internal const void *
-relation_tuple_read(MappedBuffer *buffer, size_t fixed_size, size_t tuple_index)
+internal int16_t relation_tuple_size(int16_t fixed_size)
 {
-  return mapped_buffer_read(buffer) + sizeof(RelationHeader)
-         + (fixed_size * tuple_index);
+  return sizeof(TupleHeader) + fixed_size;
 }
 
-Tuple tuple_from_relation_buffer(
+typedef struct
+{
+  const void *data;
+  Tuple tuple;
+} StoredTupleRead;
+
+internal StoredTupleRead relation_tuple(
     MappedBuffer *buffer,
     ColumnsLength tuple_length,
     const ColumnType *types,
-    int16_t tuple_index)
+    int16_t index)
 {
   assert(types != NULL);
   assert(tuple_length > 0);
 
-  int16_t fixed_length = tuple_fixed_length(tuple_length, types);
+  const void *pointer =
+      mapped_buffer_read(buffer) + sizeof(RelationHeader)
+      + (relation_tuple_size(tuple_fixed_length(tuple_length, types)) * index);
 
-  return (Tuple){
-      .length = tuple_length,
-      .types = types,
-      .fixed_data = relation_tuple_read(buffer, fixed_length, tuple_index),
-      .variable_data = mapped_buffer_read(buffer),
+  const TupleHeader *header = pointer;
+
+  return (StoredTupleRead){
+      .data = pointer,
+      .tuple =
+          (Tuple){
+              .length = tuple_length,
+              .types = types,
+              .fixed_data = pointer + sizeof(*header),
+              .variable_data =
+                  mapped_buffer_read(buffer) + header->variable_data_start,
+          },
   };
 }
 
@@ -381,17 +403,32 @@ internal RelationHeader *relation_header_write(MappedBuffer *buffer)
   return mapped_buffer_write(buffer);
 }
 
-internal void *relation_tuple_write(
-    MappedBuffer *buffer, size_t fixed_size, size_t tuple_index)
+internal void *relation_tuple_data_write(
+    MappedBuffer *buffer, int16_t fixed_size, int16_t index)
 {
   return mapped_buffer_write(buffer) + sizeof(RelationHeader)
-         + (fixed_size * tuple_index);
+         + (relation_tuple_size(fixed_size) * index);
 }
 
-internal size_t relation_free_space(MappedBuffer *buffer, size_t fixed_size)
+internal TupleHeader *relation_tuple_header_write(
+    MappedBuffer *buffer, int16_t fixed_size, int16_t index)
+{
+  return (TupleHeader *)(relation_tuple_data_write(buffer, fixed_size, index));
+}
+
+internal TupleHeader *relation_tuple_fixed_data_write(
+    MappedBuffer *buffer, int16_t fixed_size, int16_t index)
+{
+  TupleHeader *header = relation_tuple_header_write(buffer, fixed_size, index);
+  void *data = relation_tuple_data_write(buffer, fixed_size, index);
+  return data + sizeof(*header);
+}
+
+internal size_t relation_free_space(MappedBuffer *buffer, int16_t fixed_size)
 {
   const RelationHeader *header = relation_header_read(buffer);
-  return header->variable_data_start - (fixed_size * header->allocated_records);
+  return header->variable_data_start
+         - (relation_tuple_size(fixed_size) * header->allocated_records);
 }
 
 DiskResourceCreate
@@ -542,39 +579,26 @@ PhysicalRelationInsertTupleError physical_relation_insert_tuple(
 
   MappedBuffer *buffer = disk_buffer_pool_mapped_buffer(pool, buffer_index);
   RelationHeader *header = relation_header_write(buffer);
-  void *tuple_memory = relation_tuple_write(
-      buffer, tuple_fixed_byte_length, header->allocated_records);
-
-  memory_copy_forward(tuple_memory, tuple.fixed_data, tuple_fixed_byte_length);
 
   header->variable_data_start -= tuple_variable_byte_length;
+  header->allocated_records += 1;
+
+  *relation_tuple_header_write(
+      buffer, tuple_fixed_byte_length, header->allocated_records - 1) =
+      (TupleHeader){
+          .variable_data_start = header->variable_data_start,
+      };
+
+  memory_copy_forward(
+      relation_tuple_fixed_data_write(
+          buffer, tuple_fixed_byte_length, header->allocated_records - 1),
+      tuple.fixed_data,
+      tuple_fixed_byte_length);
+
   memory_copy_forward(
       mapped_buffer_write(buffer) + header->variable_data_start,
       tuple.variable_data,
       tuple_variable_byte_length);
-
-  int16_t variable_offset = header->variable_data_start;
-  for (ColumnsLength column = 0; column < tuple.length; ++column)
-  {
-    switch (tuple.types[column])
-    {
-    case COLUMN_TYPE_INTEGER:
-    case COLUMN_TYPE_BOOLEAN:
-      break;
-
-    case COLUMN_TYPE_STRING:
-    {
-      StoreString *string =
-          tuple_memory + column_byte_offset(tuple.length, tuple.types, column);
-
-      string->offset = variable_offset;
-      variable_offset += string->length;
-    }
-    break;
-    }
-  }
-
-  header->allocated_records += 1;
 
   assert(
       tuple_fixed_byte_length * header->allocated_records
@@ -609,7 +633,7 @@ PhysicalRelationDeleteTuplesError physical_relation_delete_tuples(
   assert(types != NULL);
   assert(tuple_column_indices != NULL);
 
-  const size_t fixed_size = tuple_fixed_length(tuple_length, types);
+  const int16_t fixed_size = tuple_fixed_length(tuple_length, types);
 
   for (BlockIndex block = 0;; ++block)
   {
@@ -651,16 +675,14 @@ PhysicalRelationDeleteTuplesError physical_relation_delete_tuples(
 
     const RelationHeader *header = relation_header_read(buffer);
 
-    const int16_t initial_variable_data_start = header->variable_data_start;
-    const int16_t initial_allocated_records = header->allocated_records;
+    int16_t variable_data_start = PAGE_SIZE;
+    int16_t allocated_records = 0;
 
-    for (int16_t tuple_index = 0; tuple_index < header->allocated_records;)
+    for (int16_t tuple_index = 0; tuple_index < header->allocated_records;
+         tuple_index++)
     {
-      const void *tuple_memory =
-          relation_tuple_read(buffer, fixed_size, tuple_index);
-
-      Tuple stored_tuple =
-          tuple_from_relation_buffer(buffer, tuple_length, types, tuple_index);
+      StoredTupleRead stored_tuple =
+          relation_tuple(buffer, tuple_length, types, tuple_index);
 
       bool32 delete = true;
       for (ColumnsLength i = 0; i < tuple.length && delete; ++i)
@@ -668,70 +690,44 @@ PhysicalRelationDeleteTuplesError physical_relation_delete_tuples(
         ColumnsLength column = tuple_column_indices[i];
         delete = column_value_eq(
             tuple.types[column],
-            tuple_get(stored_tuple, column),
+            tuple_get(stored_tuple.tuple, column),
             tuple_get(tuple, i));
       }
 
-      int16_t variable_data_start = PAGE_SIZE;
-      int16_t variable_data_end = header->variable_data_start;
-      for (ColumnsLength i = 0; i < tuple_length; ++i)
+      if (!delete)
       {
-        switch (types[i])
+        int16_t tuple_variable_data_length = tuple_variable_length(
+            tuple_length, types, stored_tuple.tuple.fixed_data);
+
+        if (allocated_records != tuple_index)
         {
-        case COLUMN_TYPE_INTEGER:
-        case COLUMN_TYPE_BOOLEAN:
-          break;
+          memory_copy_forward(
+              relation_tuple_data_write(buffer, fixed_size, allocated_records),
+              stored_tuple.data,
+              relation_tuple_size(fixed_size));
 
-        case COLUMN_TYPE_STRING:
-        {
-          if (initial_allocated_records != header->allocated_records)
-          {
-            StoredValue *field =
-                relation_tuple_write(buffer, fixed_size, tuple_index)
-                + column_byte_offset(tuple_length, types, i);
-
-            field->string.offset +=
-                header->variable_data_start - initial_variable_data_start;
-          }
-
-          const StoredValue *field =
-              tuple_memory + column_byte_offset(tuple_length, types, i);
-
-          variable_data_start = MIN(variable_data_start, field->string.offset);
-          variable_data_end = MAX(
-              variable_data_end, field->string.offset + field->string.length);
-        }
-        break;
-        }
-      }
-
-      if (delete)
-      {
-        relation_header_write(buffer)->allocated_records -= 1;
-
-        void *tuple_memory =
-            relation_tuple_write(buffer, fixed_size, tuple_index);
-
-        memory_copy_forward(
-            tuple_memory,
-            tuple_memory + fixed_size,
-            fixed_size * (header->allocated_records - tuple_index));
-
-        if (variable_data_start != PAGE_SIZE)
-        {
           memory_copy_backward(
-              mapped_buffer_write(buffer) + variable_data_end - 1,
               mapped_buffer_write(buffer) + variable_data_start - 1,
-              variable_data_start - header->variable_data_start);
+              stored_tuple.tuple.variable_data + tuple_variable_data_length - 1,
+              tuple_variable_data_length);
 
-          relation_header_write(buffer)->variable_data_start +=
-              variable_data_end - variable_data_start;
+          relation_tuple_header_write(buffer, fixed_size, allocated_records)
+              ->variable_data_start =
+              variable_data_start - tuple_variable_data_length;
         }
+
+        variable_data_start -= tuple_variable_data_length;
+        allocated_records += 1;
       }
-      else
-      {
-        tuple_index++;
-      }
+    }
+
+    // NOTE: using relation_header_write sets the modified state in the buffer,
+    // thus we don't set unless needed
+    if (allocated_records != header->allocated_records)
+    {
+      RelationHeader *header = relation_header_write(buffer);
+      header->allocated_records = allocated_records;
+      header->variable_data_start = variable_data_start;
     }
 
     DiskBufferPoolSaveError save_error =
@@ -894,12 +890,15 @@ Tuple physical_relation_iterator_get(
     ColumnsLength tuple_length)
 {
   assert(it != NULL);
+  assert(types != NULL);
+  assert(tuple_length > 0);
 
-  return tuple_from_relation_buffer(
-      disk_buffer_pool_mapped_buffer(it->pool, it->buffer_index),
-      tuple_length,
-      types,
-      it->tuple_index);
+  return relation_tuple(
+             disk_buffer_pool_mapped_buffer(it->pool, it->buffer_index),
+             tuple_length,
+             types,
+             it->tuple_index)
+      .tuple;
 }
 
 void physical_relation_iterator_close(PhysicalRelationIterator *it)
