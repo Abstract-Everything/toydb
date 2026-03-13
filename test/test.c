@@ -104,7 +104,7 @@ internal void query_iterator_print(QueryIterator query_it)
 
   assert(
       tuple_iterator_valid(it)
-      == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_TUPLES);
+      == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS);
 
   printf("\n\n");
 }
@@ -573,7 +573,7 @@ internal void multi_stage_query(Database *db)
   run_query(db, ARRAY_LENGTH(parameters), parameters);
 }
 
-internal void delete_tuples(Database *db)
+internal void delete_tuple_user_with_id_0(Database *db)
 {
   ColumnsLength tuple_length = 1;
   int16_t column_index = 0;
@@ -754,7 +754,7 @@ int main(int argc, char *argv[])
   sql_manual_join(&db);
 
   printf("Deleting user with id 0\n");
-  delete_tuples(&db);
+  delete_tuple_user_with_id_0(&db);
   dump_users_table(&db);
 
   printf("Dropping users table\n");

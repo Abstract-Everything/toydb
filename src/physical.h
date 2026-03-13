@@ -87,6 +87,8 @@ typedef union
   StringSlice string;
 } ColumnValue;
 
+bool32 column_value_eq(ColumnType type, ColumnValue lhs, ColumnValue rhs);
+
 typedef struct
 {
   ColumnsLength length;
@@ -121,40 +123,16 @@ void physical_relation_delete(DiskBufferPool *pool, RelationId id);
 typedef enum
 {
   PHYSICAL_RELATION_INSERT_TUPLE_OK,
-  PHYSICAL_RELATION_INSERT_TUPLE_SAVING,
-  PHYSICAL_RELATION_INSERT_TUPLE_OPENING_BUFFER,
-  PHYSICAL_RELATION_INSERT_TUPLE_BUFFER_POOL_FULL,
   PHYSICAL_RELATION_INSERT_TUPLE_TOO_BIG,
 } PhysicalRelationInsertTupleError;
-
-// TODO: This assumes that the column types do not change between inserts
-PhysicalRelationInsertTupleError physical_relation_insert_tuple(
-    DiskBufferPool *pool,
-    RelationId relation_id,
-    const bool32 *primary_keys,
-    Tuple tuple);
-
-typedef enum
-{
-  PHYSICAL_RELATION_DELETE_TUPLES_OK,
-  PHYSICAL_RELATION_DELETE_TUPLES_READING,
-  PHYSICAL_RELATION_DELETE_TUPLES_WRITING,
-  PHYSICAL_RELATION_DELETE_TUPLES_BUFFER_POOL_FULL,
-} PhysicalRelationDeleteTuplesError;
-
-PhysicalRelationDeleteTuplesError physical_relation_delete_tuples(
-    DiskBufferPool *pool,
-    RelationId relation_id,
-    ColumnsLength tuple_length,
-    const ColumnType *types,
-    const ColumnsLength *tuple_column_indices,
-    Tuple tuple);
 
 typedef enum
 {
   PHYSICAL_RELATION_ITERATOR_STATUS_OK,
-  PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_TUPLES,
-  PHYSICAL_RELATION_ITERATOR_STATUS_ERROR,
+  PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS,
+  PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE,
+  PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL,
+  PHYSICAL_RELATION_ITERATOR_STATUS_IO,
 } PhysicalRelationIteratorStatus;
 
 typedef struct
@@ -164,17 +142,41 @@ typedef struct
   size_t buffer_index;
   int16_t tuple_index;
   PhysicalRelationIteratorStatus status;
+
+  ColumnsLength tuple_length;
+  const ColumnType *types;
+  int16_t tuple_fixed_size;
+
+  int16_t deleted_records;
+  int16_t deleted_variable_data;
 } PhysicalRelationIterator;
 
-PhysicalRelationIterator
-physical_relation_iterate(DiskBufferPool *pool, RelationId id);
+PhysicalRelationIterator physical_relation_iterate_tuples(
+    DiskBufferPool *pool,
+    RelationId id,
+    ColumnsLength tuple_length,
+    const ColumnType *types);
 
-void physical_relation_iterator_next(PhysicalRelationIterator *it);
+PhysicalRelationIterator physical_relation_iterate_blocks(
+    DiskBufferPool *pool,
+    RelationId id,
+    ColumnsLength tuple_length,
+    const ColumnType *types);
 
-Tuple physical_relation_iterator_get(
-    PhysicalRelationIterator *it,
-    const ColumnType *types,
-    ColumnsLength tuple_length);
+void physical_relation_iterator_next_tuple(PhysicalRelationIterator *it);
+
+void physical_relation_iterator_next_block(PhysicalRelationIterator *it);
+
+void physical_relation_iterator_new_block(PhysicalRelationIterator *it);
+
+Tuple physical_relation_iterator_get(PhysicalRelationIterator *it);
+
+bool32 physical_relation_iterator_is_block_empty(PhysicalRelationIterator *it);
+
+PhysicalRelationInsertTupleError
+physical_relation_iterator_insert(PhysicalRelationIterator *it, Tuple tuple);
+
+void physical_relation_iterator_delete(PhysicalRelationIterator *it);
 
 void physical_relation_iterator_close(PhysicalRelationIterator *it);
 

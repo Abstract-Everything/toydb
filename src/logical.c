@@ -70,6 +70,224 @@ STATIC_ASSERT(
 
 // ---------- Logical Relation ----------
 
+internal bool32 tuple_violates_primary_key(
+    DiskBufferPool *pool,
+    RelationId relation_id,
+    const bool32 *primary_keys,
+    Tuple tuple)
+{
+  PhysicalRelationIterator i;
+  for (i = physical_relation_iterate_tuples(
+           pool, relation_id, tuple.length, tuple.types);
+       i.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
+       physical_relation_iterator_next_tuple(&i))
+  {
+    bool32 matches_all = true;
+
+    Tuple stored_tuple = physical_relation_iterator_get(&i);
+
+    for (ColumnsLength column = 0; column < tuple.length && matches_all;
+         ++column)
+    {
+      if (!primary_keys[column])
+      {
+        continue;
+      }
+
+      ColumnValue value = tuple_get(stored_tuple, column);
+
+      switch (tuple.types[column])
+      {
+      case COLUMN_TYPE_INTEGER:
+        matches_all = value.integer == tuple_get(tuple, column).integer;
+        break;
+
+      case COLUMN_TYPE_BOOLEAN:
+        matches_all = value.boolean == tuple_get(tuple, column).boolean;
+        break;
+
+      case COLUMN_TYPE_STRING:
+        matches_all =
+            string_slice_eq(tuple_get(tuple, column).string, value.string);
+        break;
+      }
+    }
+
+    if (matches_all)
+    {
+      physical_relation_iterator_close(&i);
+      return true;
+    }
+  }
+  physical_relation_iterator_close(&i);
+
+  return false;
+}
+
+internal LogicalRelationInsertTupleError insert_tuple(
+    DiskBufferPool *pool,
+    RelationId relation_id,
+    ColumnsLength tuple_length,
+    const ColumnType *types,
+    const bool32 *primary_keys,
+    Tuple tuple)
+{
+  assert(pool != NULL);
+
+  if (tuple.length != tuple_length)
+  {
+    return LOGICAL_RELATION_INSERT_TUPLE_TUPLE_LENGTH_MISMATCH;
+  }
+
+  for (size_t i = 0; i < tuple.length; ++i)
+  {
+    if (tuple.types[i] != types[i])
+    {
+      return LOGICAL_RELATION_INSERT_TUPLE_COLUMN_TYPE_MISMATCH;
+    }
+  }
+
+  if (tuple_violates_primary_key(pool, relation_id, primary_keys, tuple))
+  {
+    return LOGICAL_RELATION_INSERT_TUPLE_PRIMARY_KEY_VIOLATION;
+  }
+
+  bool32 empty_block_visited = false;
+  LogicalRelationInsertTupleError error = LOGICAL_RELATION_INSERT_TUPLE_TOO_BIG;
+
+  PhysicalRelationIterator it;
+  for (it = physical_relation_iterate_blocks(
+           pool, relation_id, tuple_length, types);
+       it.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK
+       && error != LOGICAL_RELATION_INSERT_TUPLE_OK;
+       physical_relation_iterator_next_block(&it))
+  {
+    switch (physical_relation_iterator_insert(&it, tuple))
+    {
+    case PHYSICAL_RELATION_INSERT_TUPLE_OK:
+      error = LOGICAL_RELATION_INSERT_TUPLE_OK;
+      break;
+
+    case PHYSICAL_RELATION_INSERT_TUPLE_TOO_BIG:
+      error = LOGICAL_RELATION_INSERT_TUPLE_TOO_BIG;
+      break;
+    }
+
+    empty_block_visited =
+        empty_block_visited || physical_relation_iterator_is_block_empty(&it);
+  }
+
+  // If an empty block insert has already been attempted creating a new block
+  // will fail since it will have the same space available
+  if (error != LOGICAL_RELATION_INSERT_TUPLE_OK && !empty_block_visited)
+  {
+    physical_relation_iterator_new_block(&it);
+
+    switch (it.status)
+    {
+    case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
+      error = LOGICAL_RELATION_INSERT_TUPLE_OK;
+      break;
+
+    case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
+      assert(false);
+      break;
+
+    case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+      error = LOGICAL_RELATION_INSERT_TUPLE_BUFFER_POOL_FULL;
+      break;
+
+    case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+    case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
+      error = LOGICAL_RELATION_INSERT_TUPLE_IO;
+      break;
+    }
+
+    switch (physical_relation_iterator_insert(&it, tuple))
+    {
+    case PHYSICAL_RELATION_INSERT_TUPLE_OK:
+      error = LOGICAL_RELATION_INSERT_TUPLE_OK;
+      break;
+
+    case PHYSICAL_RELATION_INSERT_TUPLE_TOO_BIG:
+      error = LOGICAL_RELATION_INSERT_TUPLE_TOO_BIG;
+      break;
+    }
+  }
+
+  physical_relation_iterator_close(&it);
+
+  return error;
+}
+
+internal LogicalRelationDeleteTuplesError delete_tuples(
+    DiskBufferPool *pool,
+    RelationId relation_id,
+    ColumnsLength tuple_length,
+    const ColumnType *types,
+    // TDOO: take column names instead of indices
+    ColumnsLength *column_indices,
+    Tuple tuple)
+{
+  assert(pool != NULL);
+
+  for (ColumnsLength i = 0; i < tuple.length; ++i)
+  {
+    for (ColumnsLength j = i + 1; j < tuple.length; ++j)
+    {
+      assert(column_indices[i] != column_indices[j]);
+    }
+  }
+
+  for (ColumnsLength i = 0; i < tuple.length; ++i)
+  {
+    if (column_indices[i] >= tuple_length)
+    {
+      return LOGICAL_RELATION_DELETE_TUPLES_TUPLE_LENGTH_MISMATCH;
+    }
+  }
+
+  for (ColumnsLength i = 0; i < tuple.length; ++i)
+  {
+    ColumnsLength column = column_indices[i];
+    if (tuple.types[column] != types[column])
+    {
+      return LOGICAL_RELATION_DELETE_TUPLES_COLUMN_TYPE_MISMATCH;
+    }
+  }
+
+  PhysicalRelationIterator it;
+  for (it = physical_relation_iterate_tuples(
+           pool, relation_id, tuple_length, types);
+       it.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
+       physical_relation_iterator_next_tuple(&it))
+  {
+    Tuple stored_tuple = physical_relation_iterator_get(&it);
+
+    bool32 delete = true;
+    for (ColumnsLength i = 0; i < tuple.length && delete; ++i)
+    {
+      ColumnsLength column = column_indices[i];
+      delete = column_value_eq(
+          tuple.types[column],
+          tuple_get(stored_tuple, column),
+          tuple_get(tuple, i));
+    }
+
+    if (delete)
+    {
+      physical_relation_iterator_delete(&it);
+    }
+  }
+
+  // TODO: Use transactions to handle failure
+  assert(it.status == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS);
+
+  physical_relation_iterator_close(&it);
+
+  return LOGICAL_RELATION_DELETE_TUPLES_OK;
+}
+
 typedef struct
 {
   RelationId relation_id;
@@ -82,12 +300,15 @@ query_relation_id_by_name(DiskBufferPool *pool, StringSlice name)
   RelationId relation_id = 0;
 
   PhysicalRelationIterator i;
-  for (i = physical_relation_iterate(pool, RELATIONS_RELATION_ID);
+  for (i = physical_relation_iterate_tuples(
+           pool,
+           RELATIONS_RELATION_ID,
+           ARRAY_LENGTH(relations_types),
+           relations_types);
        i.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
-       physical_relation_iterator_next(&i))
+       physical_relation_iterator_next_tuple(&i))
   {
-    Tuple tuple = physical_relation_iterator_get(
-        &i, relations_types, ARRAY_LENGTH(relations_types));
+    Tuple tuple = physical_relation_iterator_get(&i);
 
     if (string_slice_eq(name, tuple_get_string(tuple, 1)))
     {
@@ -123,12 +344,15 @@ query_new_relation_id(DiskBufferPool *pool, StringSlice name)
   int64_t relation_id = RESERVED_RELATION_IDS;
 
   PhysicalRelationIterator i;
-  for (i = physical_relation_iterate(pool, RELATIONS_RELATION_ID);
+  for (i = physical_relation_iterate_tuples(
+           pool,
+           RELATIONS_RELATION_ID,
+           ARRAY_LENGTH(relations_types),
+           relations_types);
        i.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
-       physical_relation_iterator_next(&i))
+       physical_relation_iterator_next_tuple(&i))
   {
-    Tuple tuple = physical_relation_iterator_get(
-        &i, relations_types, ARRAY_LENGTH(relations_types));
+    Tuple tuple = physical_relation_iterator_get(&i);
 
     if (string_slice_eq(name, tuple_get_string(tuple, 1)))
     {
@@ -150,12 +374,14 @@ query_new_relation_id(DiskBufferPool *pool, StringSlice name)
         .error = QUERY_NEW_RELATION_ID_PROGRAM_ERROR,
     };
 
-  case PHYSICAL_RELATION_ITERATOR_STATUS_ERROR:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
     return (QueryNewRelationIdByNameResult){
         .error = QUERY_NEW_RELATION_ID_READING,
     };
 
-  case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_TUPLES:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
     return (QueryNewRelationIdByNameResult){
         .error = QUERY_NEW_RELATION_ID_OK,
         .relation_id = relation_id,
@@ -326,24 +552,30 @@ internal RelationMetadataResult relation_metadata(
   case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
     break;
 
-  case PHYSICAL_RELATION_ITERATOR_STATUS_ERROR:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
     return (RelationMetadataResult){.error = RELATION_METADATA_IO};
 
-  case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_TUPLES:
-    return (RelationMetadataResult){.error =
-                                        RELATION_METADATA_RELATION_NOT_FOUND};
+  case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
+    return (RelationMetadataResult){
+        .error = RELATION_METADATA_RELATION_NOT_FOUND,
+    };
   }
 
   size_t tuple_length = 0;
   size_t largest_column_id = 0;
   {
     PhysicalRelationIterator i;
-    for (i = physical_relation_iterate(pool, RELATION_COLUMNS_RELATION_ID);
+    for (i = physical_relation_iterate_tuples(
+             pool,
+             RELATION_COLUMNS_RELATION_ID,
+             ARRAY_LENGTH(relation_columns_types),
+             relation_columns_types);
          i.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
-         physical_relation_iterator_next(&i))
+         physical_relation_iterator_next_tuple(&i))
     {
-      Tuple tuple = physical_relation_iterator_get(
-          &i, relation_columns_types, ARRAY_LENGTH(relation_columns_types));
+      Tuple tuple = physical_relation_iterator_get(&i);
 
       if (tuple_get_integer(tuple, 0) != result.relation_id)
       {
@@ -389,13 +621,16 @@ internal RelationMetadataResult relation_metadata(
   bool32 failed = false;
   {
     PhysicalRelationIterator i;
-    for (i = physical_relation_iterate(pool, RELATION_COLUMNS_RELATION_ID);
+    for (i = physical_relation_iterate_tuples(
+             pool,
+             RELATION_COLUMNS_RELATION_ID,
+             ARRAY_LENGTH(relation_columns_types),
+             relation_columns_types);
          i.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK
          && status == ALLOCATE_OK;
-         physical_relation_iterator_next(&i))
+         physical_relation_iterator_next_tuple(&i))
     {
-      Tuple tuple = physical_relation_iterator_get(
-          &i, relation_columns_types, ARRAY_LENGTH(relation_columns_types));
+      Tuple tuple = physical_relation_iterator_get(&i);
 
       if (tuple_get_integer(tuple, 0) != result.relation_id)
       {
@@ -425,11 +660,13 @@ internal RelationMetadataResult relation_metadata(
       assert(false);
       break;
 
-    case PHYSICAL_RELATION_ITERATOR_STATUS_ERROR:
+    case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+    case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+    case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
       failed = true;
       break;
 
-    case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_TUPLES:
+    case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
       failed = false;
       break;
     }
@@ -600,10 +837,10 @@ LogicalRelationCreateError logical_relation_create(
     return LOGICAL_RELATION_CREATE_PROGRAM_ERROR;
   }
 
-  PhysicalRelationInsertTupleError insert_error =
-      PHYSICAL_RELATION_INSERT_TUPLE_OK;
+  LogicalRelationInsertTupleError insert_error =
+      LOGICAL_RELATION_INSERT_TUPLE_OK;
   for (int16_t column = 0; column < tuple_length
-                           && insert_error == PHYSICAL_RELATION_INSERT_TUPLE_OK;
+                           && insert_error == LOGICAL_RELATION_INSERT_TUPLE_OK;
        ++column)
   {
     ColumnValue relation_column_values[] = {
@@ -624,11 +861,11 @@ LogicalRelationCreateError logical_relation_create(
         relation_column_values);
     char data[data_length] = {};
 
-    // TODO: Use logical_relation_insert_tuple or a subset of it to enforce
-    // checks
-    insert_error = physical_relation_insert_tuple(
+    insert_error = insert_tuple(
         pool,
         RELATION_COLUMNS_RELATION_ID,
+        ARRAY_LENGTH(relation_column_values),
+        relation_columns_types,
         relation_columns_primary_keys,
         tuple_from_data(
             ARRAY_LENGTH(relation_column_values),
@@ -638,7 +875,7 @@ LogicalRelationCreateError logical_relation_create(
             relation_column_values));
   }
 
-  if (insert_error == PHYSICAL_RELATION_INSERT_TUPLE_OK)
+  if (insert_error == LOGICAL_RELATION_INSERT_TUPLE_OK)
   {
     ColumnValue relations_values[] = {
         {.integer = result.relation_id},
@@ -652,10 +889,11 @@ LogicalRelationCreateError logical_relation_create(
         ARRAY_LENGTH(relations_types), relations_types, relations_values);
     char data[data_length] = {};
 
-    // TODO: Use logical_relation_insert_tuple or a subset of it to enforce
-    insert_error = physical_relation_insert_tuple(
+    insert_error = insert_tuple(
         pool,
         RELATIONS_RELATION_ID,
+        ARRAY_LENGTH(relations_values),
+        relations_types,
         relations_primary_keys,
         tuple_from_data(
             ARRAY_LENGTH(relations_values),
@@ -666,7 +904,7 @@ LogicalRelationCreateError logical_relation_create(
   }
 
   // TODO: Use transactions to handle failure
-  assert(insert_error == PHYSICAL_RELATION_INSERT_TUPLE_OK);
+  assert(insert_error == LOGICAL_RELATION_INSERT_TUPLE_OK);
 
   return LOGICAL_RELATION_CREATE_OK;
 }
@@ -684,10 +922,12 @@ logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name)
   case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
     break;
 
-  case PHYSICAL_RELATION_ITERATOR_STATUS_ERROR:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
     return LOGICAL_RELATION_DROP_IO;
 
-  case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_TUPLES:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
     return LOGICAL_RELATION_DROP_NOT_FOUND;
   }
 
@@ -701,8 +941,7 @@ logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name)
     size_t data_length = tuple_data_length(tuple_length, &type, &value);
     char data[data_length] = {};
 
-    // TODO: Use logical_relation_delete_tuples or a subset of it to enforce
-    PhysicalRelationDeleteTuplesError error = physical_relation_delete_tuples(
+    LogicalRelationDeleteTuplesError error = delete_tuples(
         pool,
         RELATION_COLUMNS_RELATION_ID,
         ARRAY_LENGTH(relation_columns_types),
@@ -711,7 +950,7 @@ logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name)
         tuple_from_data(tuple_length, &type, data_length, data, &value));
 
     // TODO: Use transactions to handle failure
-    assert(error == PHYSICAL_RELATION_DELETE_TUPLES_OK);
+    assert(error == LOGICAL_RELATION_DELETE_TUPLES_OK);
   }
 
   {
@@ -724,8 +963,7 @@ logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name)
     size_t data_length = tuple_data_length(tuple_length, &type, &value);
     char data[data_length] = {};
 
-    // TODO: Use logical_relation_delete_tuples or a subset of it to enforce
-    PhysicalRelationDeleteTuplesError error = physical_relation_delete_tuples(
+    LogicalRelationDeleteTuplesError error = delete_tuples(
         pool,
         RELATIONS_RELATION_ID,
         ARRAY_LENGTH(relations_types),
@@ -734,64 +972,10 @@ logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name)
         tuple_from_data(tuple_length, &type, data_length, data, &value));
 
     // TODO: Use transactions to handle failure
-    assert(error == PHYSICAL_RELATION_DELETE_TUPLES_OK);
+    assert(error == LOGICAL_RELATION_DELETE_TUPLES_OK);
   }
 
   return LOGICAL_RELATION_DROP_OK;
-}
-
-internal bool32 tuple_violates_primary_key(
-    DiskBufferPool *pool,
-    RelationId relation_id,
-    const bool32 *primary_keys,
-    Tuple tuple)
-{
-  PhysicalRelationIterator i;
-  for (i = physical_relation_iterate(pool, relation_id);
-       i.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
-       physical_relation_iterator_next(&i))
-  {
-    bool32 matches_all = true;
-
-    Tuple stored_tuple =
-        physical_relation_iterator_get(&i, tuple.types, tuple.length);
-
-    for (ColumnsLength column = 0; column < tuple.length && matches_all;
-         ++column)
-    {
-      if (!primary_keys[column])
-      {
-        continue;
-      }
-
-      ColumnValue value = tuple_get(stored_tuple, column);
-
-      switch (tuple.types[column])
-      {
-      case COLUMN_TYPE_INTEGER:
-        matches_all = value.integer == tuple_get(tuple, column).integer;
-        break;
-
-      case COLUMN_TYPE_BOOLEAN:
-        matches_all = value.boolean == tuple_get(tuple, column).boolean;
-        break;
-
-      case COLUMN_TYPE_STRING:
-        matches_all =
-            string_slice_eq(tuple_get(tuple, column).string, value.string);
-        break;
-      }
-    }
-
-    if (matches_all)
-    {
-      physical_relation_iterator_close(&i);
-      return true;
-    }
-  }
-  physical_relation_iterator_close(&i);
-
-  return false;
 }
 
 LogicalRelationInsertTupleError logical_relation_insert_tuple(
@@ -823,69 +1007,27 @@ LogicalRelationInsertTupleError logical_relation_insert_tuple(
     return LOGICAL_RELATION_INSERT_TUPLE_NOT_FOUND;
   }
 
-  if (tuple.length != result.tuple_length)
-  {
-    deallocate_relation_metadata(&result);
-    return LOGICAL_RELATION_INSERT_TUPLE_TUPLE_LENGTH_MISMATCH;
-  }
-
-  for (size_t i = 0; i < tuple.length; ++i)
-  {
-    if (tuple.types[i] != result.types[i])
-    {
-      deallocate_relation_metadata(&result);
-      return LOGICAL_RELATION_INSERT_TUPLE_COLUMN_TYPE_MISMATCH;
-    }
-  }
-
-  if (tuple_violates_primary_key(
-          pool, result.relation_id, result.primary_keys, tuple))
-  {
-    return LOGICAL_RELATION_INSERT_TUPLE_PRIMARY_KEY_VIOLATION;
-  }
-
-  PhysicalRelationInsertTupleError insert_error =
-      physical_relation_insert_tuple(
-          pool, result.relation_id, result.primary_keys, tuple);
+  LogicalRelationInsertTupleError insert_error = insert_tuple(
+      pool,
+      result.relation_id,
+      result.tuple_length,
+      result.types,
+      result.primary_keys,
+      tuple);
 
   deallocate_relation_metadata(&result);
 
-  switch (insert_error)
-  {
-  case PHYSICAL_RELATION_INSERT_TUPLE_OK:
-    return LOGICAL_RELATION_INSERT_TUPLE_OK;
-
-  case PHYSICAL_RELATION_INSERT_TUPLE_SAVING:
-  case PHYSICAL_RELATION_INSERT_TUPLE_OPENING_BUFFER:
-  case PHYSICAL_RELATION_INSERT_TUPLE_BUFFER_POOL_FULL:
-    // Use transactions to handle failure
-    assert(false);
-    return LOGICAL_RELATION_INSERT_TUPLE_IO;
-
-  case PHYSICAL_RELATION_INSERT_TUPLE_TOO_BIG:
-    return LOGICAL_RELATION_INSERT_TUPLE_TOO_BIG;
-  }
+  return insert_error;
 }
 
 LogicalRelationDeleteTuplesError logical_relation_delete_tuples(
     DiskBufferPool *pool,
     StringSlice relation_name,
-    // TDOO: take column name instead of index
+    // TDOO: take column names instead of indices
     ColumnsLength *column_indices,
     Tuple tuple)
 {
   assert(pool != NULL);
-
-  for (ColumnsLength i = 0; i < tuple.length; ++i)
-  {
-    for (ColumnsLength j = i + 1; j < tuple.length; ++j)
-    {
-      if (column_indices[i] == column_indices[j])
-      {
-        return LOGICAL_RELATION_DELETE_TUPLES_DUPLICATE_COLUMN_INDICES;
-      }
-    }
-  }
 
   RelationMetadataResult result =
       relation_metadata(pool, relation_name, false, false);
@@ -911,26 +1053,7 @@ LogicalRelationDeleteTuplesError logical_relation_delete_tuples(
     return LOGICAL_RELATION_DELETE_TUPLES_NOT_FOUND;
   }
 
-  for (ColumnsLength i = 0; i < tuple.length; ++i)
-  {
-    if (column_indices[i] >= result.tuple_length)
-    {
-      deallocate_relation_metadata(&result);
-      return LOGICAL_RELATION_DELETE_TUPLES_TUPLE_LENGTH_MISMATCH;
-    }
-  }
-
-  for (ColumnsLength i = 0; i < tuple.length; ++i)
-  {
-    ColumnsLength column = column_indices[i];
-    if (tuple.types[column] != result.types[column])
-    {
-      deallocate_relation_metadata(&result);
-      return LOGICAL_RELATION_DELETE_TUPLES_COLUMN_TYPE_MISMATCH;
-    }
-  }
-
-  PhysicalRelationDeleteTuplesError error = physical_relation_delete_tuples(
+  LogicalRelationDeleteTuplesError error = delete_tuples(
       pool,
       result.relation_id,
       result.tuple_length,
@@ -939,7 +1062,7 @@ LogicalRelationDeleteTuplesError logical_relation_delete_tuples(
       tuple);
 
   // TODO: Use transactions to handle failure
-  assert(error == PHYSICAL_RELATION_DELETE_TUPLES_OK);
+  assert(error == LOGICAL_RELATION_DELETE_TUPLES_OK);
 
   deallocate_relation_metadata(&result);
 
@@ -1226,10 +1349,7 @@ tuple_iterator_column_value(TupleIterator *it, ColumnsLength column_id)
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-    return tuple_get(
-        physical_relation_iterator_get(
-            &it->read.it, it->read.column_types, it->read.tuple_length),
-        column_id);
+    return tuple_get(physical_relation_iterator_get(&it->read.it), column_id);
 
   case QUERY_OPERATOR_PROJECT:
     return tuple_iterator_column_value(
@@ -1321,8 +1441,11 @@ internal void tuple_iterator_reset(TupleIterator *it)
   case QUERY_OPERATOR_READ:
   {
     physical_relation_iterator_close(&it->read.it);
-    it->read.it =
-        physical_relation_iterate(it->read.it.pool, it->read.it.relation_id);
+    it->read.it = physical_relation_iterate_tuples(
+        it->read.it.pool,
+        it->read.it.relation_id,
+        it->read.tuple_length,
+        it->read.column_types);
   }
   break;
 
@@ -1354,7 +1477,7 @@ void tuple_iterator_next(TupleIterator *it)
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-    physical_relation_iterator_next(&it->read.it);
+    physical_relation_iterator_next_tuple(&it->read.it);
     break;
 
   case QUERY_OPERATOR_PROJECT:
@@ -1377,7 +1500,7 @@ void tuple_iterator_next(TupleIterator *it)
   {
     tuple_iterator_next(it->cartesian_product.rhs);
     if (tuple_iterator_valid(it->cartesian_product.rhs)
-        == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_TUPLES)
+        == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS)
     {
       tuple_iterator_reset(it->cartesian_product.rhs);
       tuple_iterator_next(it->cartesian_product.lhs);
@@ -1603,7 +1726,11 @@ QueryIteratorError query_iterator_new(
             .operator = QUERY_OPERATOR_READ,
             .read =
                 {
-                    .it = physical_relation_iterate(pool, result.relation_id),
+                    .it = physical_relation_iterate_tuples(
+                        pool,
+                        result.relation_id,
+                        result.tuple_length,
+                        result.types),
                     .column_names = result.names,
                     .column_types = result.types,
                     .tuple_length = result.tuple_length,

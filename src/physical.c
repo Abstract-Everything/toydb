@@ -146,8 +146,7 @@ internal int16_t column_byte_offset(
   return offset;
 }
 
-internal bool32
-column_value_eq(ColumnType type, ColumnValue lhs, ColumnValue rhs)
+bool32 column_value_eq(ColumnType type, ColumnValue lhs, ColumnValue rhs)
 {
   switch (type)
   {
@@ -366,6 +365,7 @@ internal int16_t relation_tuple_size(int16_t fixed_size)
 
 typedef struct
 {
+  const TupleHeader *header;
   const void *data;
   Tuple tuple;
 } StoredTupleRead;
@@ -386,6 +386,7 @@ internal StoredTupleRead relation_tuple(
   const TupleHeader *header = pointer;
 
   return (StoredTupleRead){
+      .header = header,
       .data = pointer,
       .tuple =
           (Tuple){
@@ -447,405 +448,262 @@ void physical_relation_delete(DiskBufferPool *pool, RelationId id)
       pool, (DiskResource){.type = RESOURCE_TYPE_RELATION, .relation_id = id});
 }
 
-// TODO: This assumes that the column types do not change between inserts
-PhysicalRelationInsertTupleError physical_relation_insert_tuple(
-    DiskBufferPool *pool,
-    RelationId relation_id,
-    const bool32 *primary_keys,
-    Tuple tuple)
+internal void overwrite_last_deleted_tuple_with_valid_tuple(
+    PhysicalRelationIterator *it, int16_t tuple_index)
 {
-  assert(pool != NULL);
-  assert(primary_keys != NULL);
-
-  const int16_t tuple_fixed_byte_length =
-      tuple_fixed_length(tuple.length, tuple.types);
-
-  const int16_t tuple_variable_byte_length =
-      tuple_variable_length(tuple.length, tuple.types, tuple.fixed_data);
-
-  const size_t required_space =
-      tuple_fixed_byte_length
-      + tuple_variable_length(tuple.length, tuple.types, tuple.fixed_data);
-
-  size_t buffer_index = 0;
-  enum
+  assert(it->status == PHYSICAL_RELATION_ITERATOR_STATUS_OK);
+  if (it->deleted_records == 0)
   {
-    INSERT_TUPLE_STATUS_NEXT_BLOCK,
-    INSERT_TUPLE_STATUS_NO_MORE_BLOCKS,
-    INSERT_TUPLE_STATUS_POOL_FULL,
-    INSERT_TUPLE_STATUS_FOUND,
-  } status = INSERT_TUPLE_STATUS_NEXT_BLOCK;
-
-  BlockIndex block = 0;
-  for (block = 0; status == INSERT_TUPLE_STATUS_NEXT_BLOCK; ++block)
-  {
-    DiskBufferPoolOpenResult result = disk_buffer_pool_open(
-        pool,
-        (DiskResource){.type = RESOURCE_TYPE_RELATION,
-                       .relation_id = relation_id},
-        block);
-
-    buffer_index = result.buffer_index;
-
-    switch (result.error)
-    {
-    case DISK_BUFFER_POOL_OPEN_OK:
-    {
-      if (required_space <= relation_free_space(
-              disk_buffer_pool_mapped_buffer(pool, buffer_index),
-              tuple_fixed_byte_length))
-      {
-        buffer_index = result.buffer_index;
-        status = INSERT_TUPLE_STATUS_FOUND;
-      }
-      else
-      {
-        disk_buffer_pool_close(pool, result.buffer_index);
-      }
-    }
-    break;
-
-    case DISK_BUFFER_POOL_OPEN_OPENING_FILE:
-    case DISK_BUFFER_POOL_OPEN_SEEKING_FILE:
-    case DISK_BUFFER_POOL_OPEN_READING_FILE:
-      status = INSERT_TUPLE_STATUS_NEXT_BLOCK;
-      continue;
-
-    case DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL:
-      status = INSERT_TUPLE_STATUS_NO_MORE_BLOCKS;
-      break;
-
-    case DISK_BUFFER_POOL_OPEN_BUFFER_POOL_FULL:
-      status = INSERT_TUPLE_STATUS_POOL_FULL;
-      break;
-    }
+    return;
   }
 
-  switch (status)
-  {
-  case INSERT_TUPLE_STATUS_FOUND:
-    break;
+  MappedBuffer *buffer =
+      disk_buffer_pool_mapped_buffer(it->pool, it->buffer_index);
 
-  case INSERT_TUPLE_STATUS_POOL_FULL:
-    return PHYSICAL_RELATION_INSERT_TUPLE_BUFFER_POOL_FULL;
+  const RelationHeader *header = relation_header_read(buffer);
 
-  case INSERT_TUPLE_STATUS_NEXT_BLOCK:
-    assert(false);
-    break;
+  StoredTupleRead stored_tuple =
+      relation_tuple(buffer, it->tuple_length, it->types, tuple_index);
 
-  case INSERT_TUPLE_STATUS_NO_MORE_BLOCKS:
-  {
-    RelationHeader init_header = (RelationHeader){
-        .allocated_records = 0,
-        .variable_data_start = PAGE_SIZE,
-    };
+  int16_t tuple_variable_data_length = tuple_variable_length(
+      it->tuple_length, it->types, stored_tuple.tuple.fixed_data);
 
-    DiskBufferPoolNewBlockOpenResult result = disk_buffer_pool_new_block_open(
-        pool,
-        (DiskResource){.type = RESOURCE_TYPE_RELATION,
-                       .relation_id = relation_id},
-        &init_header,
-        sizeof(init_header));
-
-    switch (result.error)
-    {
-    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_OK:
-      break;
-
-    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_BUFFER_POOL_FULL:
-      return PHYSICAL_RELATION_INSERT_TUPLE_BUFFER_POOL_FULL;
-      break;
-
-    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_OPENING_FILE:
-    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_RESIZE_FILE:
-    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_READ_FILE_SIZE:
-    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_SEEKING_FILE:
-    case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_READING_FILE:
-      return PHYSICAL_RELATION_INSERT_TUPLE_OPENING_BUFFER;
-    }
-
-    buffer_index = result.buffer_index;
-
-    if (required_space > relation_free_space(
-            disk_buffer_pool_mapped_buffer(pool, result.buffer_index),
-            tuple_fixed_byte_length))
-    {
-      disk_buffer_pool_close(pool, result.buffer_index);
-      return PHYSICAL_RELATION_INSERT_TUPLE_TOO_BIG;
-    }
-  }
-  break;
-  }
-
-  MappedBuffer *buffer = disk_buffer_pool_mapped_buffer(pool, buffer_index);
-  RelationHeader *header = relation_header_write(buffer);
-
-  header->variable_data_start -= tuple_variable_byte_length;
-  header->allocated_records += 1;
-
-  *relation_tuple_header_write(
-      buffer, tuple_fixed_byte_length, header->allocated_records - 1) =
-      (TupleHeader){
-          .variable_data_start = header->variable_data_start,
-      };
+  memory_copy_backward(
+      mapped_buffer_write(buffer) + stored_tuple.header->variable_data_start
+          + it->deleted_variable_data + tuple_variable_data_length - 1,
+      stored_tuple.tuple.variable_data + tuple_variable_data_length - 1,
+      tuple_variable_data_length);
 
   memory_copy_forward(
-      relation_tuple_fixed_data_write(
-          buffer, tuple_fixed_byte_length, header->allocated_records - 1),
-      tuple.fixed_data,
-      tuple_fixed_byte_length);
+      relation_tuple_data_write(
+          buffer, it->tuple_fixed_size, tuple_index - it->deleted_records),
+      stored_tuple.data,
+      relation_tuple_size(it->tuple_fixed_size));
 
-  memory_copy_forward(
-      mapped_buffer_write(buffer) + header->variable_data_start,
-      tuple.variable_data,
-      tuple_variable_byte_length);
-
-  assert(
-      tuple_fixed_byte_length * header->allocated_records
-      <= header->variable_data_start);
-
-  DiskBufferPoolSaveError save_error =
-      disk_buffer_pool_save_buffer(pool, buffer_index);
-
-  disk_buffer_pool_close(pool, buffer_index);
-
-  switch (save_error)
-  {
-  case DISK_BUFFER_POOL_SAVE_OK:
-    return PHYSICAL_RELATION_INSERT_TUPLE_OK;
-
-  case DISK_BUFFER_POOL_SAVE_SEEKING_FILE:
-  case DISK_BUFFER_POOL_SAVE_WRITING_FILE:
-  case DISK_BUFFER_POOL_SAVE_SYNC:
-    return PHYSICAL_RELATION_INSERT_TUPLE_SAVING;
-  }
+  relation_tuple_header_write(
+      buffer, it->tuple_fixed_size, tuple_index - it->deleted_records)
+      ->variable_data_start += it->deleted_variable_data;
 }
 
-PhysicalRelationDeleteTuplesError physical_relation_delete_tuples(
+/// Some tuple may have been deleted from the block, this results in the block
+/// having some 'holes' in the data, before closing the buffer we should replace
+/// these holes with actual tuples, otherwise iteration will return garbage data
+internal void overwrite_deleted_tuples(PhysicalRelationIterator *it)
+{
+  assert(it->status == PHYSICAL_RELATION_ITERATOR_STATUS_OK);
+
+  if (it->deleted_records == 0)
+  {
+    assert(it->deleted_variable_data == 0);
+    return;
+  }
+
+  assert(it->tuple_index >= it->deleted_records);
+
+  MappedBuffer *buffer =
+      disk_buffer_pool_mapped_buffer(it->pool, it->buffer_index);
+
+  RelationHeader *header = relation_header_write(buffer);
+
+  for (int16_t tuple_index = it->tuple_index;
+       tuple_index < header->allocated_records;
+       ++tuple_index)
+  {
+    overwrite_last_deleted_tuple_with_valid_tuple(it, tuple_index);
+  }
+
+  header->allocated_records -= it->deleted_records;
+  header->variable_data_start += it->deleted_variable_data;
+
+  it->deleted_records = 0;
+  it->deleted_variable_data = 0;
+}
+
+internal void close_buffer_if_open(PhysicalRelationIterator *it)
+{
+  if (it->status != PHYSICAL_RELATION_ITERATOR_STATUS_OK)
+  {
+    return;
+  }
+
+  overwrite_deleted_tuples(it);
+  disk_buffer_pool_close(it->pool, it->buffer_index);
+}
+
+PhysicalRelationIterator physical_relation_iterate_blocks(
     DiskBufferPool *pool,
-    RelationId relation_id,
+    RelationId id,
     ColumnsLength tuple_length,
-    const ColumnType *types,
-    const ColumnsLength *tuple_column_indices,
-    Tuple tuple)
+    const ColumnType *types)
 {
   assert(pool != NULL);
   assert(types != NULL);
-  assert(tuple_column_indices != NULL);
+  assert(tuple_length > 0);
 
-  const int16_t fixed_size = tuple_fixed_length(tuple_length, types);
+  int16_t tuple_fixed_size = tuple_fixed_length(tuple_length, types);
 
-  for (BlockIndex block = 0;; ++block)
-  {
-    DiskBufferPoolOpenResult result = disk_buffer_pool_open(
-        pool,
-        (DiskResource){
-            .type = RESOURCE_TYPE_RELATION,
-            .relation_id = relation_id,
-        },
-        block);
+  DiskBufferPoolOpenResult result = disk_buffer_pool_open(
+      pool,
+      (DiskResource){.type = RESOURCE_TYPE_RELATION, .relation_id = id},
+      0);
 
-    // Can't use break to break out of the loop from inside the switch, so we
-    // handle this separately
-    if (result.error == DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL)
-    {
-      break;
-    }
-
-    switch (result.error)
-    {
-    case DISK_BUFFER_POOL_OPEN_OK:
-      break;
-
-    case DISK_BUFFER_POOL_OPEN_OPENING_FILE:
-    case DISK_BUFFER_POOL_OPEN_SEEKING_FILE:
-    case DISK_BUFFER_POOL_OPEN_READING_FILE:
-      return PHYSICAL_RELATION_DELETE_TUPLES_READING;
-
-    case DISK_BUFFER_POOL_OPEN_BUFFER_POOL_FULL:
-      return PHYSICAL_RELATION_DELETE_TUPLES_BUFFER_POOL_FULL;
-
-    case DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL:
-      assert(false);
-      break;
-    }
-
-    MappedBuffer *buffer =
-        disk_buffer_pool_mapped_buffer(pool, result.buffer_index);
-
-    const RelationHeader *header = relation_header_read(buffer);
-
-    int16_t variable_data_start = PAGE_SIZE;
-    int16_t allocated_records = 0;
-
-    for (int16_t tuple_index = 0; tuple_index < header->allocated_records;
-         tuple_index++)
-    {
-      StoredTupleRead stored_tuple =
-          relation_tuple(buffer, tuple_length, types, tuple_index);
-
-      bool32 delete = true;
-      for (ColumnsLength i = 0; i < tuple.length && delete; ++i)
-      {
-        ColumnsLength column = tuple_column_indices[i];
-        delete = column_value_eq(
-            tuple.types[column],
-            tuple_get(stored_tuple.tuple, column),
-            tuple_get(tuple, i));
-      }
-
-      if (!delete)
-      {
-        int16_t tuple_variable_data_length = tuple_variable_length(
-            tuple_length, types, stored_tuple.tuple.fixed_data);
-
-        if (allocated_records != tuple_index)
-        {
-          memory_copy_forward(
-              relation_tuple_data_write(buffer, fixed_size, allocated_records),
-              stored_tuple.data,
-              relation_tuple_size(fixed_size));
-
-          memory_copy_backward(
-              mapped_buffer_write(buffer) + variable_data_start - 1,
-              stored_tuple.tuple.variable_data + tuple_variable_data_length - 1,
-              tuple_variable_data_length);
-
-          relation_tuple_header_write(buffer, fixed_size, allocated_records)
-              ->variable_data_start =
-              variable_data_start - tuple_variable_data_length;
-        }
-
-        variable_data_start -= tuple_variable_data_length;
-        allocated_records += 1;
-      }
-    }
-
-    // NOTE: using relation_header_write sets the modified state in the buffer,
-    // thus we don't set unless needed
-    if (allocated_records != header->allocated_records)
-    {
-      RelationHeader *header = relation_header_write(buffer);
-      header->allocated_records = allocated_records;
-      header->variable_data_start = variable_data_start;
-    }
-
-    DiskBufferPoolSaveError save_error =
-        disk_buffer_pool_save_buffer(pool, result.buffer_index);
-
-    disk_buffer_pool_close(pool, result.buffer_index);
-
-    switch (save_error)
-    {
-    case DISK_BUFFER_POOL_SAVE_OK:
-      break;
-
-    case DISK_BUFFER_POOL_SAVE_SEEKING_FILE:
-    case DISK_BUFFER_POOL_SAVE_WRITING_FILE:
-    case DISK_BUFFER_POOL_SAVE_SYNC:
-      return PHYSICAL_RELATION_DELETE_TUPLES_WRITING;
-    }
-  }
-
-  return PHYSICAL_RELATION_DELETE_TUPLES_OK;
-}
-
-typedef enum
-{
-  LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_OK,
-  LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_NO_MORE_TUPLES,
-  LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_LOADING_PAGE,
-} LoadNextNonEmptyRelationBlockError;
-
-typedef struct
-{
-  BlockIndex block;
-  size_t buffer_index;
-  LoadNextNonEmptyRelationBlockError error;
-} LoadNextNonEmptyRelationBlockResult;
-
-internal LoadNextNonEmptyRelationBlockResult load_next_non_empty_relation_block(
-    DiskBufferPool *pool, RelationId id, BlockIndex block)
-{
-  for (;; ++block)
-  {
-    DiskBufferPoolOpenResult result = disk_buffer_pool_open(
-        pool,
-        (DiskResource){.type = RESOURCE_TYPE_RELATION, .relation_id = id},
-        block);
-
-    switch (result.error)
-    {
-    case DISK_BUFFER_POOL_OPEN_OK:
-      if (relation_header_read(
-              disk_buffer_pool_mapped_buffer(pool, result.buffer_index))
-              ->allocated_records
-          > 0)
-      {
-        return (LoadNextNonEmptyRelationBlockResult){
-            .error = LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_OK,
-            .block = block,
-            .buffer_index = result.buffer_index,
-        };
-      }
-      disk_buffer_pool_close(pool, result.buffer_index);
-      break;
-
-    case DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL:
-      return (LoadNextNonEmptyRelationBlockResult){
-          .error = LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_NO_MORE_TUPLES};
-
-    case DISK_BUFFER_POOL_OPEN_OPENING_FILE:
-    case DISK_BUFFER_POOL_OPEN_SEEKING_FILE:
-    case DISK_BUFFER_POOL_OPEN_READING_FILE:
-    case DISK_BUFFER_POOL_OPEN_BUFFER_POOL_FULL:
-      return (LoadNextNonEmptyRelationBlockResult){
-          .error = LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_LOADING_PAGE};
-    }
-  }
-}
-
-PhysicalRelationIterator
-physical_relation_iterate(DiskBufferPool *pool, RelationId id)
-{
-  assert(pool != NULL);
-
-  LoadNextNonEmptyRelationBlockResult result =
-      load_next_non_empty_relation_block(pool, id, 0);
   switch (result.error)
   {
-  case LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_OK:
+  case DISK_BUFFER_POOL_OPEN_OK:
     return (PhysicalRelationIterator){
         .pool = pool,
         .relation_id = id,
         .buffer_index = result.buffer_index,
         .tuple_index = 0,
         .status = PHYSICAL_RELATION_ITERATOR_STATUS_OK,
+
+        .tuple_length = tuple_length,
+        .types = types,
+        .tuple_fixed_size = tuple_fixed_size,
+
+        .deleted_records = 0,
+        .deleted_variable_data = 0,
     };
 
-  case LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_NO_MORE_TUPLES:
+  case DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL:
     return (PhysicalRelationIterator){
         .pool = pool,
         .relation_id = id,
         .buffer_index = {},
         .tuple_index = 0,
-        .status = PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_TUPLES,
+        .status = PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS,
+
+        .tuple_length = tuple_length,
+        .types = types,
+        .tuple_fixed_size = tuple_fixed_size,
+
+        .deleted_records = 0,
+        .deleted_variable_data = 0,
     };
 
-  case LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_LOADING_PAGE:
+  case DISK_BUFFER_POOL_OPEN_OPENING_FILE:
+  case DISK_BUFFER_POOL_OPEN_SEEKING_FILE:
+  case DISK_BUFFER_POOL_OPEN_READING_FILE:
+  case DISK_BUFFER_POOL_OPEN_BUFFER_POOL_FULL:
     return (PhysicalRelationIterator){
         .pool = pool,
         .relation_id = id,
         .buffer_index = {},
         .tuple_index = 0,
-        .status = PHYSICAL_RELATION_ITERATOR_STATUS_ERROR,
+        .status = PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE,
+
+        .tuple_length = tuple_length,
+        .types = types,
+        .tuple_fixed_size = tuple_fixed_size,
+
+        .deleted_records = 0,
+        .deleted_variable_data = 0,
     };
   }
 }
 
-void physical_relation_iterator_next(PhysicalRelationIterator *it)
+PhysicalRelationIterator physical_relation_iterate_tuples(
+    DiskBufferPool *pool,
+    RelationId id,
+    ColumnsLength tuple_length,
+    const ColumnType *types)
+{
+  PhysicalRelationIterator it =
+      physical_relation_iterate_blocks(pool, id, tuple_length, types);
+
+  if (it.status != PHYSICAL_RELATION_ITERATOR_STATUS_OK)
+  {
+    return it;
+  }
+
+  if (physical_relation_iterator_is_block_empty(&it))
+  {
+    physical_relation_iterator_next_tuple(&it);
+  }
+
+  return it;
+}
+
+void physical_relation_iterator_next_block(PhysicalRelationIterator *it)
+{
+  assert(it->status == PHYSICAL_RELATION_ITERATOR_STATUS_OK);
+
+  int16_t block = mapped_buffer_block(
+      disk_buffer_pool_mapped_buffer(it->pool, it->buffer_index));
+  close_buffer_if_open(it);
+
+  DiskBufferPoolOpenResult result = disk_buffer_pool_open(
+      it->pool,
+      (DiskResource){
+          .type = RESOURCE_TYPE_RELATION,
+          .relation_id = it->relation_id,
+      },
+      block + 1);
+
+  switch (result.error)
+  {
+  case DISK_BUFFER_POOL_OPEN_OK:
+    it->buffer_index = result.buffer_index;
+    it->tuple_index = 0;
+    break;
+
+  case DISK_BUFFER_POOL_OPEN_FILE_TOO_SMALL:
+    it->status = PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS;
+    break;
+
+  case DISK_BUFFER_POOL_OPEN_OPENING_FILE:
+  case DISK_BUFFER_POOL_OPEN_SEEKING_FILE:
+  case DISK_BUFFER_POOL_OPEN_READING_FILE:
+  case DISK_BUFFER_POOL_OPEN_BUFFER_POOL_FULL:
+    it->status = PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE;
+    break;
+  }
+}
+
+void physical_relation_iterator_new_block(PhysicalRelationIterator *it)
+{
+  close_buffer_if_open(it);
+
+  RelationHeader init_header = (RelationHeader){
+      .allocated_records = 0,
+      .variable_data_start = PAGE_SIZE,
+  };
+
+  DiskBufferPoolNewBlockOpenResult result = disk_buffer_pool_new_block_open(
+      it->pool,
+      (DiskResource){
+          .type = RESOURCE_TYPE_RELATION,
+          .relation_id = it->relation_id,
+      },
+      &init_header,
+      sizeof(init_header));
+
+  switch (result.error)
+  {
+  case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_OK:
+    it->buffer_index = result.buffer_index;
+    it->tuple_index = 0;
+    it->status = PHYSICAL_RELATION_ITERATOR_STATUS_OK;
+    break;
+
+  case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_BUFFER_POOL_FULL:
+    it->status = PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL;
+    break;
+
+  case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_OPENING_FILE:
+  case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_RESIZE_FILE:
+  case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_READ_FILE_SIZE:
+  case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_SEEKING_FILE:
+  case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_READING_FILE:
+    it->status = PHYSICAL_RELATION_ITERATOR_STATUS_IO;
+    break;
+  }
+}
+
+void physical_relation_iterator_next_tuple(PhysicalRelationIterator *it)
 {
   assert(it != NULL);
+  assert(it->status == PHYSICAL_RELATION_ITERATOR_STATUS_OK);
 
   MappedBuffer *buffer =
       disk_buffer_pool_mapped_buffer(it->pool, it->buffer_index);
@@ -853,60 +711,113 @@ void physical_relation_iterator_next(PhysicalRelationIterator *it)
   it->tuple_index += 1;
   if (it->tuple_index < relation_header_read(buffer)->allocated_records)
   {
+    overwrite_last_deleted_tuple_with_valid_tuple(it, it->tuple_index);
     return;
   }
 
-  disk_buffer_pool_close(it->pool, it->buffer_index);
-
-  LoadNextNonEmptyRelationBlockResult result =
-      load_next_non_empty_relation_block(
-          it->pool, it->relation_id, mapped_buffer_block(buffer) + 1);
-
-  switch (result.error)
+  do
   {
-  case LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_OK:
-    *it = (PhysicalRelationIterator){
-        .pool = it->pool,
-        .relation_id = it->relation_id,
-        .buffer_index = result.buffer_index,
-        .tuple_index = 0,
-        .status = PHYSICAL_RELATION_ITERATOR_STATUS_OK,
-    };
-    break;
-
-  case LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_NO_MORE_TUPLES:
-    it->status = PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_TUPLES;
-    break;
-
-  case LOAD_NEXT_NON_EMPTY_RELATION_BLOCK_LOADING_PAGE:
-    it->status = PHYSICAL_RELATION_ITERATOR_STATUS_ERROR;
-    break;
-  }
+    physical_relation_iterator_next_block(it);
+  } while (it->status == PHYSICAL_RELATION_ITERATOR_STATUS_OK
+           && physical_relation_iterator_is_block_empty(it));
 }
 
-Tuple physical_relation_iterator_get(
-    PhysicalRelationIterator *it,
-    const ColumnType *types,
-    ColumnsLength tuple_length)
+Tuple physical_relation_iterator_get(PhysicalRelationIterator *it)
 {
   assert(it != NULL);
-  assert(types != NULL);
-  assert(tuple_length > 0);
+  assert(it->status == PHYSICAL_RELATION_ITERATOR_STATUS_OK);
+
+  const RelationHeader *header = relation_header_read(
+      disk_buffer_pool_mapped_buffer(it->pool, it->buffer_index));
+
+  assert(it->tuple_index < header->allocated_records);
 
   return relation_tuple(
              disk_buffer_pool_mapped_buffer(it->pool, it->buffer_index),
-             tuple_length,
-             types,
+             it->tuple_length,
+             it->types,
              it->tuple_index)
       .tuple;
 }
 
+bool32 physical_relation_iterator_is_block_empty(PhysicalRelationIterator *it)
+{
+  assert(it != NULL);
+  assert(it->status == PHYSICAL_RELATION_ITERATOR_STATUS_OK);
+
+  MappedBuffer *buffer =
+      disk_buffer_pool_mapped_buffer(it->pool, it->buffer_index);
+  return relation_header_read(buffer)->allocated_records == 0;
+}
+
+PhysicalRelationInsertTupleError
+physical_relation_iterator_insert(PhysicalRelationIterator *it, Tuple tuple)
+{
+  assert(it != NULL);
+  assert(it->status == PHYSICAL_RELATION_ITERATOR_STATUS_OK);
+
+  const int16_t tuple_variable_byte_length =
+      tuple_variable_length(tuple.length, tuple.types, tuple.fixed_data);
+
+  const size_t required_space =
+      relation_tuple_size(it->tuple_fixed_size)
+      + tuple_variable_length(tuple.length, tuple.types, tuple.fixed_data);
+
+  if (required_space > relation_free_space(
+          disk_buffer_pool_mapped_buffer(it->pool, it->buffer_index),
+          it->tuple_fixed_size))
+  {
+    return PHYSICAL_RELATION_INSERT_TUPLE_TOO_BIG;
+  }
+
+  MappedBuffer *buffer =
+      disk_buffer_pool_mapped_buffer(it->pool, it->buffer_index);
+  RelationHeader *header = relation_header_write(buffer);
+
+  header->variable_data_start -= tuple_variable_byte_length;
+
+  *relation_tuple_header_write(
+      buffer, it->tuple_fixed_size, header->allocated_records) = (TupleHeader){
+      .variable_data_start = header->variable_data_start,
+  };
+
+  memory_copy_forward(
+      mapped_buffer_write(buffer) + header->variable_data_start,
+      tuple.variable_data,
+      tuple_variable_byte_length);
+
+  memory_copy_forward(
+      relation_tuple_fixed_data_write(
+          buffer, it->tuple_fixed_size, header->allocated_records),
+      tuple.fixed_data,
+      it->tuple_fixed_size);
+
+  header->allocated_records += 1;
+
+  assert(
+      relation_tuple_size(it->tuple_fixed_size) * header->allocated_records
+      <= header->variable_data_start);
+
+  return PHYSICAL_RELATION_INSERT_TUPLE_OK;
+}
+
+void physical_relation_iterator_delete(PhysicalRelationIterator *it)
+{
+  assert(it != NULL);
+  assert(it->status == PHYSICAL_RELATION_ITERATOR_STATUS_OK);
+
+  it->deleted_records += 1;
+  it->deleted_variable_data += tuple_variable_length(
+      it->tuple_length,
+      it->types,
+      physical_relation_iterator_get(it).fixed_data);
+}
+
 void physical_relation_iterator_close(PhysicalRelationIterator *it)
 {
-  if (it->status == PHYSICAL_RELATION_ITERATOR_STATUS_OK)
-  {
-    disk_buffer_pool_close(it->pool, it->buffer_index);
-  }
+  assert(it != NULL);
+
+  close_buffer_if_open(it);
 }
 
 // ----- Relation -----
