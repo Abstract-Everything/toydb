@@ -398,7 +398,7 @@ internal TupleHeader *relation_tuple_header_write(
   return (TupleHeader *)(relation_tuple_data_write(buffer, fixed_size, index));
 }
 
-internal TupleHeader *relation_tuple_fixed_data_write(
+internal void *relation_tuple_fixed_data_write(
     MappedBuffer *buffer, int16_t fixed_size, int16_t index)
 {
   TupleHeader *header = relation_tuple_header_write(buffer, fixed_size, index);
