@@ -76,8 +76,8 @@ typedef struct
   DiskBufferPoolNewBlockOpenError error;
 } DiskBufferPoolNewBlockOpenResult;
 
-internal DiskBufferPoolNewBlockOpenResult disk_buffer_pool_new_block_open(
-    DiskBufferPool *pool, DiskResource resource, void *data, size_t length);
+internal DiskBufferPoolNewBlockOpenResult
+disk_buffer_pool_new_block_open(DiskBufferPool *pool, DiskResource resource);
 
 typedef enum
 {
@@ -664,27 +664,30 @@ void physical_relation_iterator_new_block(PhysicalRelationIterator *it)
 {
   close_buffer_if_open(it);
 
-  RelationHeader init_header = (RelationHeader){
-      .allocated_records = 0,
-      .variable_data_start = PAGE_SIZE,
-  };
-
   DiskBufferPoolNewBlockOpenResult result = disk_buffer_pool_new_block_open(
       it->pool,
       (DiskResource){
           .type = RESOURCE_TYPE_RELATION,
           .relation_id = it->relation_id,
-      },
-      &init_header,
-      sizeof(init_header));
+      });
 
   switch (result.error)
   {
   case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_OK:
+  {
+    MappedBuffer *buffer =
+        disk_buffer_pool_mapped_buffer(it->pool, result.buffer_index);
+
+    *relation_header_write(buffer) = (RelationHeader){
+        .allocated_records = 0,
+        .variable_data_start = PAGE_SIZE,
+    };
+
     it->buffer_index = result.buffer_index;
     it->tuple_index = 0;
     it->status = PHYSICAL_RELATION_ITERATOR_STATUS_OK;
-    break;
+  }
+  break;
 
   case DISK_BUFFER_POOL_NEW_BLOCK_OPEN_BUFFER_POOL_FULL:
     it->status = PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL;
@@ -1331,8 +1334,8 @@ internal DiskBufferPoolOpenResult disk_buffer_pool_open(
   };
 }
 
-internal DiskBufferPoolNewBlockOpenResult disk_buffer_pool_new_block_open(
-    DiskBufferPool *pool, DiskResource resource, void *data, size_t length)
+internal DiskBufferPoolNewBlockOpenResult
+disk_buffer_pool_new_block_open(DiskBufferPool *pool, DiskResource resource)
 {
   DiskBufferPoolFindFreeBufferResult free_buffer_result =
       disk_buffer_pool_find_free_buffer(pool);
@@ -1393,8 +1396,6 @@ internal DiskBufferPoolNewBlockOpenResult disk_buffer_pool_new_block_open(
   }
 
   assert(read_result.count == PAGE_SIZE);
-
-  memory_copy_forward(page, data, length);
 
   pool->buffers[free_buffer_result.index] = (MappedBuffer){
       .status = MAPPED_BUFFER_STATUS_ALLOCATED,
