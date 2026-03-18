@@ -995,7 +995,7 @@ LogicalRelationInsertTupleError logical_relation_insert_tuple(
     return LOGICAL_RELATION_INSERT_TUPLE_OUT_OF_MEMORY;
 
   case RELATION_METADATA_RELATION_NOT_FOUND:
-    return LOGICAL_RELATION_INSERT_TUPLE_NOT_FOUND;
+    return LOGICAL_RELATION_INSERT_TUPLE_RELATION_NOT_FOUND;
 
   case RELATION_METADATA_IO:
     return LOGICAL_RELATION_INSERT_TUPLE_IO;
@@ -1004,7 +1004,7 @@ LogicalRelationInsertTupleError logical_relation_insert_tuple(
   if (result.relation_id < RESERVED_RELATION_IDS)
   {
     deallocate_relation_metadata(&result);
-    return LOGICAL_RELATION_INSERT_TUPLE_NOT_FOUND;
+    return LOGICAL_RELATION_INSERT_TUPLE_RELATION_NOT_FOUND;
   }
 
   LogicalRelationInsertTupleError insert_error = insert_tuple(
