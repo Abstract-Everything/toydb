@@ -279,35 +279,29 @@ Tuple tuple_from_data(
   };
 }
 
-internal StoredValue tuple_get_raw(Tuple tuple, ColumnsLength index)
+ColumnValue tuple_get(Tuple tuple, ColumnsLength index)
 {
   assert(index < tuple.length);
 
   const StoredValue *value =
       tuple.fixed_data + column_byte_offset(tuple.length, tuple.types, index);
-  return *value;
-}
-
-ColumnValue tuple_get(Tuple tuple, ColumnsLength index)
-{
-  const StoredValue value = tuple_get_raw(tuple, index);
 
   switch (tuple.types[index])
   {
   case COLUMN_TYPE_INTEGER:
-    return (ColumnValue){.integer = value.integer};
+    return (ColumnValue){.integer = value->integer};
 
   case COLUMN_TYPE_STRING:
     return (ColumnValue){
         .string =
             (StringSlice){
-                .length = value.string.length,
-                .data = tuple.variable_data + value.string.offset,
+                .length = value->string.length,
+                .data = tuple.variable_data + value->string.offset,
             },
     };
 
   case COLUMN_TYPE_BOOLEAN:
-    return (ColumnValue){.boolean = value.boolean};
+    return (ColumnValue){.boolean = value->boolean};
   }
 }
 
