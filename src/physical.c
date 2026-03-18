@@ -120,19 +120,6 @@ internal size_t column_type_fixed_size(ColumnType type)
   }
 }
 
-internal size_t column_type_variable_size(ColumnType type, ColumnValue value)
-{
-  switch (type)
-  {
-  case COLUMN_TYPE_INTEGER:
-  case COLUMN_TYPE_BOOLEAN:
-    return 0;
-
-  case COLUMN_TYPE_STRING:
-    return value.string.length;
-  }
-}
-
 internal int16_t column_byte_offset(
     ColumnsLength tuple_length, const ColumnType *types, ColumnsLength index)
 {
