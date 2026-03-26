@@ -160,8 +160,6 @@ typedef struct TupleIterator TupleIterator;
 
 ColumnsLength tuple_iterator_tuple_length(TupleIterator *it);
 
-PhysicalRelationIteratorStatus tuple_iterator_valid(TupleIterator *it);
-
 StringSlice
 tuple_iterator_column_name(TupleIterator *it, ColumnsLength column_id);
 
@@ -171,7 +169,7 @@ tuple_iterator_column_type(TupleIterator *it, ColumnsLength column_id);
 ColumnValue
 tuple_iterator_column_value(TupleIterator *it, ColumnsLength column_id);
 
-void tuple_iterator_next(TupleIterator *it);
+PhysicalRelationIteratorStatus tuple_iterator_next(TupleIterator *it);
 
 typedef struct
 {
@@ -197,7 +195,13 @@ QueryIteratorError query_iterator_new(
 
 void query_iterator_destroy(QueryIterator *it);
 
-TupleIterator *query_iterator_get_output_iterator(QueryIterator *it);
+typedef struct
+{
+  TupleIterator *it;
+  PhysicalRelationIteratorStatus status;
+} QueryIteratorStartResult;
+
+QueryIteratorStartResult query_iterator_start(QueryIterator *it);
 
 // ----- Query -----
 

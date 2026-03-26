@@ -57,7 +57,13 @@ void assert_database_insert_tuple(
 
 internal void query_iterator_print(QueryIterator query_it)
 {
-  TupleIterator *it = query_iterator_get_output_iterator(&query_it);
+  QueryIteratorStartResult result = query_iterator_start(&query_it);
+  assert(
+      result.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK
+      || result.status == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS);
+
+  TupleIterator *it = result.it;
+
   ColumnsLength tuple_length = tuple_iterator_tuple_length(it);
   for (ColumnsLength i = 0; i < tuple_length; ++i)
   {
@@ -72,8 +78,9 @@ internal void query_iterator_print(QueryIterator query_it)
 
   printf("\n---------\n");
 
-  for (; tuple_iterator_valid(it) == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
-       tuple_iterator_next(it))
+  PhysicalRelationIteratorStatus status = result.status;
+  for (; status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
+       status = tuple_iterator_next(it))
   {
     for (ColumnsLength column = 0; column < tuple_length; ++column)
     {
@@ -102,9 +109,7 @@ internal void query_iterator_print(QueryIterator query_it)
     printf("\n");
   }
 
-  assert(
-      tuple_iterator_valid(it)
-      == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS);
+  assert(status == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS);
 
   printf("\n\n");
 }

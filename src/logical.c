@@ -76,15 +76,17 @@ internal bool32 tuple_violates_primary_key(
     const bool32 *primary_keys,
     Tuple tuple)
 {
-  PhysicalRelationIterator i;
-  for (i = physical_relation_iterate_tuples(
-           pool, relation_id, tuple.length, tuple.types);
-       i.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
-       physical_relation_iterator_next_tuple(&i))
+  PhysicalRelationIterator it =
+      physical_relation_iterator(pool, relation_id, tuple.length, tuple.types);
+
+  PhysicalRelationIteratorStatus status = physical_relation_iterate_tuples(&it);
+
+  for (; status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
+       status = physical_relation_iterator_next_tuple(&it))
   {
     bool32 matches_all = true;
 
-    Tuple stored_tuple = physical_relation_iterator_get(&i);
+    Tuple stored_tuple = physical_relation_iterator_get(&it);
 
     for (ColumnsLength column = 0; column < tuple.length && matches_all;
          ++column)
@@ -115,11 +117,14 @@ internal bool32 tuple_violates_primary_key(
 
     if (matches_all)
     {
-      physical_relation_iterator_close(&i);
+      physical_relation_iterator_close(&it);
       return true;
     }
   }
-  physical_relation_iterator_close(&i);
+  physical_relation_iterator_close(&it);
+
+  // TODO: return error
+  assert(status == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS);
 
   return false;
 }
@@ -155,12 +160,14 @@ internal LogicalRelationInsertTupleError insert_tuple(
   bool32 empty_block_visited = false;
   LogicalRelationInsertTupleError error = LOGICAL_RELATION_INSERT_TUPLE_TOO_BIG;
 
-  PhysicalRelationIterator it;
-  for (it = physical_relation_iterate_blocks(
-           pool, relation_id, tuple_length, types);
-       it.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK
-       && error != LOGICAL_RELATION_INSERT_TUPLE_OK;
-       physical_relation_iterator_next_block(&it))
+  PhysicalRelationIterator it =
+      physical_relation_iterator(pool, relation_id, tuple_length, types);
+
+  PhysicalRelationIteratorStatus status = physical_relation_iterate_blocks(&it);
+
+  for (; status == PHYSICAL_RELATION_ITERATOR_STATUS_OK
+         && error != LOGICAL_RELATION_INSERT_TUPLE_OK;
+       status = physical_relation_iterator_next_block(&it))
   {
     switch (physical_relation_iterator_insert(&it, tuple))
     {
@@ -177,13 +184,30 @@ internal LogicalRelationInsertTupleError insert_tuple(
         empty_block_visited || physical_relation_iterator_is_block_empty(&it);
   }
 
+  switch (status)
+  {
+  case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
+    assert(false);
+    break;
+
+  case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
+    break;
+
+  case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+    error = LOGICAL_RELATION_INSERT_TUPLE_BUFFER_POOL_FULL;
+    break;
+
+  case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
+    error = LOGICAL_RELATION_INSERT_TUPLE_IO;
+    break;
+  }
+
   // If an empty block insert has already been attempted creating a new block
   // will fail since it will have the same space available
   if (error != LOGICAL_RELATION_INSERT_TUPLE_OK && !empty_block_visited)
   {
-    physical_relation_iterator_new_block(&it);
-
-    switch (it.status)
+    switch (physical_relation_iterator_new_block(&it))
     {
     case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
       error = LOGICAL_RELATION_INSERT_TUPLE_OK;
@@ -256,11 +280,13 @@ internal LogicalRelationDeleteTuplesError delete_tuples(
     }
   }
 
-  PhysicalRelationIterator it;
-  for (it = physical_relation_iterate_tuples(
-           pool, relation_id, tuple_length, types);
-       it.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
-       physical_relation_iterator_next_tuple(&it))
+  PhysicalRelationIterator it =
+      physical_relation_iterator(pool, relation_id, tuple_length, types);
+
+  PhysicalRelationIteratorStatus status = physical_relation_iterate_tuples(&it);
+
+  for (; status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
+       status = physical_relation_iterator_next_tuple(&it))
   {
     Tuple stored_tuple = physical_relation_iterator_get(&it);
 
@@ -281,7 +307,7 @@ internal LogicalRelationDeleteTuplesError delete_tuples(
   }
 
   // TODO: Use transactions to handle failure
-  assert(it.status == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS);
+  assert(status == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS);
 
   physical_relation_iterator_close(&it);
 
@@ -299,16 +325,18 @@ query_relation_id_by_name(DiskBufferPool *pool, StringSlice name)
 {
   RelationId relation_id = 0;
 
-  PhysicalRelationIterator i;
-  for (i = physical_relation_iterate_tuples(
-           pool,
-           RELATIONS_RELATION_ID,
-           ARRAY_LENGTH(relations_types),
-           relations_types);
-       i.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
-       physical_relation_iterator_next_tuple(&i))
+  PhysicalRelationIterator it = physical_relation_iterator(
+      pool,
+      RELATIONS_RELATION_ID,
+      ARRAY_LENGTH(relations_types),
+      relations_types);
+
+  PhysicalRelationIteratorStatus status = physical_relation_iterate_tuples(&it);
+
+  for (; status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
+       status = physical_relation_iterator_next_tuple(&it))
   {
-    Tuple tuple = physical_relation_iterator_get(&i);
+    Tuple tuple = physical_relation_iterator_get(&it);
 
     if (string_slice_eq(name, tuple_get_string(tuple, 1)))
     {
@@ -316,10 +344,10 @@ query_relation_id_by_name(DiskBufferPool *pool, StringSlice name)
       break;
     }
   }
-  physical_relation_iterator_close(&i);
+  physical_relation_iterator_close(&it);
 
   return (QueryRelationIdByNameResult){
-      .status = i.status,
+      .status = status,
       .relation_id = relation_id,
   };
 }
@@ -343,20 +371,22 @@ query_new_relation_id(DiskBufferPool *pool, StringSlice name)
 {
   int64_t relation_id = RESERVED_RELATION_IDS;
 
-  PhysicalRelationIterator i;
-  for (i = physical_relation_iterate_tuples(
-           pool,
-           RELATIONS_RELATION_ID,
-           ARRAY_LENGTH(relations_types),
-           relations_types);
-       i.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
-       physical_relation_iterator_next_tuple(&i))
+  PhysicalRelationIterator it = physical_relation_iterator(
+      pool,
+      RELATIONS_RELATION_ID,
+      ARRAY_LENGTH(relations_types),
+      relations_types);
+
+  PhysicalRelationIteratorStatus status = physical_relation_iterate_tuples(&it);
+
+  for (; status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
+       status = physical_relation_iterator_next_tuple(&it))
   {
-    Tuple tuple = physical_relation_iterator_get(&i);
+    Tuple tuple = physical_relation_iterator_get(&it);
 
     if (string_slice_eq(name, tuple_get_string(tuple, 1)))
     {
-      physical_relation_iterator_close(&i);
+      physical_relation_iterator_close(&it);
       return (QueryNewRelationIdByNameResult){
           .error = QUERY_NEW_RELATION_ID_ALREADY_EXISTS,
       };
@@ -364,9 +394,9 @@ query_new_relation_id(DiskBufferPool *pool, StringSlice name)
 
     relation_id = tuple_get_integer(tuple, 0) + 1;
   }
-  physical_relation_iterator_close(&i);
+  physical_relation_iterator_close(&it);
 
-  switch (i.status)
+  switch (status)
   {
   case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
     assert(false);
@@ -566,16 +596,19 @@ internal RelationMetadataResult relation_metadata(
   size_t tuple_length = 0;
   size_t largest_column_id = 0;
   {
-    PhysicalRelationIterator i;
-    for (i = physical_relation_iterate_tuples(
-             pool,
-             RELATION_COLUMNS_RELATION_ID,
-             ARRAY_LENGTH(relation_columns_types),
-             relation_columns_types);
-         i.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
-         physical_relation_iterator_next_tuple(&i))
+    PhysicalRelationIterator it = physical_relation_iterator(
+        pool,
+        RELATION_COLUMNS_RELATION_ID,
+        ARRAY_LENGTH(relation_columns_types),
+        relation_columns_types);
+
+    PhysicalRelationIteratorStatus iterator_status =
+        physical_relation_iterate_tuples(&it);
+
+    for (; iterator_status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
+         iterator_status = physical_relation_iterator_next_tuple(&it))
     {
-      Tuple tuple = physical_relation_iterator_get(&i);
+      Tuple tuple = physical_relation_iterator_get(&it);
 
       if (tuple_get_integer(tuple, 0) != result.relation_id)
       {
@@ -585,7 +618,23 @@ internal RelationMetadataResult relation_metadata(
       largest_column_id = MAX(tuple_get_integer(tuple, 1), largest_column_id);
       tuple_length += 1;
     }
-    physical_relation_iterator_close(&i);
+    physical_relation_iterator_close(&it);
+
+    switch (iterator_status)
+    {
+    case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
+      break;
+
+    case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
+      // All tuple should be consumed, so iterator should fail or finish
+      assert(false);
+      break;
+
+    case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+    case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+    case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
+      return (RelationMetadataResult){.error = RELATION_METADATA_IO};
+    }
   }
 
   // We don't allow relations without columns to exist
@@ -620,17 +669,20 @@ internal RelationMetadataResult relation_metadata(
 
   bool32 failed = false;
   {
-    PhysicalRelationIterator i;
-    for (i = physical_relation_iterate_tuples(
-             pool,
-             RELATION_COLUMNS_RELATION_ID,
-             ARRAY_LENGTH(relation_columns_types),
-             relation_columns_types);
-         i.status == PHYSICAL_RELATION_ITERATOR_STATUS_OK
-         && status == ALLOCATE_OK;
-         physical_relation_iterator_next_tuple(&i))
+    PhysicalRelationIterator it = physical_relation_iterator(
+        pool,
+        RELATION_COLUMNS_RELATION_ID,
+        ARRAY_LENGTH(relation_columns_types),
+        relation_columns_types);
+
+    PhysicalRelationIteratorStatus iterator_status =
+        physical_relation_iterate_tuples(&it);
+
+    for (; iterator_status == PHYSICAL_RELATION_ITERATOR_STATUS_OK
+           && status == ALLOCATE_OK;
+         iterator_status = physical_relation_iterator_next_tuple(&it))
     {
-      Tuple tuple = physical_relation_iterator_get(&i);
+      Tuple tuple = physical_relation_iterator_get(&it);
 
       if (tuple_get_integer(tuple, 0) != result.relation_id)
       {
@@ -652,8 +704,9 @@ internal RelationMetadataResult relation_metadata(
             names + column_id, relation_name, tuple_get_string(tuple, 2));
       }
     }
+    physical_relation_iterator_close(&it);
 
-    switch (i.status)
+    switch (iterator_status)
     {
     case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
       // All tuple should be consumed, so iterator should fail or finish
@@ -670,8 +723,6 @@ internal RelationMetadataResult relation_metadata(
       failed = false;
       break;
     }
-
-    physical_relation_iterator_close(&i);
   }
 
   if (status != ALLOCATE_OK || failed)
@@ -1249,24 +1300,6 @@ ColumnsLength tuple_iterator_tuple_length(TupleIterator *it)
   }
 }
 
-PhysicalRelationIteratorStatus tuple_iterator_valid(TupleIterator *it)
-{
-  switch (it->operator)
-  {
-  case QUERY_OPERATOR_READ:
-    return it->read.it.status;
-
-  case QUERY_OPERATOR_PROJECT:
-    return tuple_iterator_valid(it->project.it);
-
-  case QUERY_OPERATOR_SELECT:
-    return tuple_iterator_valid(it->select.it);
-
-  case QUERY_OPERATOR_CARTESIAN_PRODUCT:
-    return tuple_iterator_valid(it->cartesian_product.lhs);
-  }
-}
-
 internal void
 cartesian_product_tuple_iterator_get_target_iterator_and_column_id(
     TupleIterator *it, TupleIterator **target_it, ColumnsLength *column_id)
@@ -1343,7 +1376,6 @@ tuple_iterator_column_type(TupleIterator *it, ColumnsLength column_id)
 ColumnValue
 tuple_iterator_column_value(TupleIterator *it, ColumnsLength column_id)
 {
-  assert(tuple_iterator_valid(it) == PHYSICAL_RELATION_ITERATOR_STATUS_OK);
   assert(column_id < tuple_iterator_tuple_length(it));
 
   switch (it->operator)
@@ -1434,77 +1466,79 @@ internal bool32 tuple_iterator_select_tuple(TupleIterator *it)
   return false;
 }
 
-internal void tuple_iterator_reset(TupleIterator *it)
+internal PhysicalRelationIteratorStatus tuple_iterator_reset(TupleIterator *it)
 {
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-  {
-    physical_relation_iterator_close(&it->read.it);
-    it->read.it = physical_relation_iterate_tuples(
-        it->read.it.pool,
-        it->read.it.relation_id,
-        it->read.tuple_length,
-        it->read.column_types);
-  }
-  break;
+    return physical_relation_iterate_tuples(&it->read.it);
 
   case QUERY_OPERATOR_PROJECT:
-    tuple_iterator_reset(it->project.it);
-    break;
+    return tuple_iterator_reset(it->project.it);
 
   case QUERY_OPERATOR_SELECT:
   {
-    tuple_iterator_reset(it->select.it);
-    if (!tuple_iterator_select_tuple(it))
+    PhysicalRelationIteratorStatus status = tuple_iterator_reset(it->select.it);
+    if (status == PHYSICAL_RELATION_ITERATOR_STATUS_OK
+        && !tuple_iterator_select_tuple(it))
     {
-      tuple_iterator_next(it);
+      return tuple_iterator_next(it);
     }
+
+    return status;
   }
   break;
 
   case QUERY_OPERATOR_CARTESIAN_PRODUCT:
   {
-    tuple_iterator_reset(it->cartesian_product.rhs);
-    tuple_iterator_reset(it->cartesian_product.lhs);
+    PhysicalRelationIteratorStatus status =
+        tuple_iterator_reset(it->cartesian_product.rhs);
+    if (status == PHYSICAL_RELATION_ITERATOR_STATUS_OK)
+    {
+      status = tuple_iterator_reset(it->cartesian_product.lhs);
+    }
+    return status;
   }
   break;
   }
 }
 
-void tuple_iterator_next(TupleIterator *it)
+PhysicalRelationIteratorStatus tuple_iterator_next(TupleIterator *it)
 {
   switch (it->operator)
   {
   case QUERY_OPERATOR_READ:
-    physical_relation_iterator_next_tuple(&it->read.it);
-    break;
+    return physical_relation_iterator_next_tuple(&it->read.it);
 
   case QUERY_OPERATOR_PROJECT:
-    tuple_iterator_next(it->project.it);
-    break;
+    return tuple_iterator_next(it->project.it);
 
   case QUERY_OPERATOR_SELECT:
   {
-    for (tuple_iterator_next(it->select.it);
-         tuple_iterator_valid(it->select.it)
-             == PHYSICAL_RELATION_ITERATOR_STATUS_OK
-         && !tuple_iterator_select_tuple(it);
-         tuple_iterator_next(it->select.it))
+    PhysicalRelationIteratorStatus status = tuple_iterator_next(it->select.it);
+    for (; status == PHYSICAL_RELATION_ITERATOR_STATUS_OK
+           && !tuple_iterator_select_tuple(it);
+         status = tuple_iterator_next(it->select.it))
     {
     }
+    return status;
   }
   break;
 
   case QUERY_OPERATOR_CARTESIAN_PRODUCT:
   {
-    tuple_iterator_next(it->cartesian_product.rhs);
-    if (tuple_iterator_valid(it->cartesian_product.rhs)
-        == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS)
+    PhysicalRelationIteratorStatus status =
+        tuple_iterator_next(it->cartesian_product.rhs);
+
+    if (status == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS)
     {
-      tuple_iterator_reset(it->cartesian_product.rhs);
-      tuple_iterator_next(it->cartesian_product.lhs);
+      status = tuple_iterator_reset(it->cartesian_product.rhs);
+      if (status == PHYSICAL_RELATION_ITERATOR_STATUS_OK)
+      {
+        status = tuple_iterator_next(it->cartesian_product.lhs);
+      }
     }
+    return status;
   }
   break;
   }
@@ -1726,7 +1760,7 @@ QueryIteratorError query_iterator_new(
             .operator = QUERY_OPERATOR_READ,
             .read =
                 {
-                    .it = physical_relation_iterate_tuples(
+                    .it = physical_relation_iterator(
                         pool,
                         result.relation_id,
                         result.tuple_length,
@@ -1836,11 +1870,6 @@ QueryIteratorError query_iterator_new(
       .iterators = iterators,
   };
 
-  // The first tuple may not be valid for some iterators, such as select. This
-  // way each iterators starts in a good state without having to account for
-  // it into the initialization code above
-  tuple_iterator_reset(&it->iterators[it->length - 1]);
-
   return QUERY_ITERATOR_OK;
 }
 
@@ -1852,9 +1881,13 @@ void query_iterator_destroy(QueryIterator *it)
   }
 }
 
-TupleIterator *query_iterator_get_output_iterator(QueryIterator *it)
+QueryIteratorStartResult query_iterator_start(QueryIterator *query_it)
 {
-  return &it->iterators[it->length - 1];
+  TupleIterator *it = query_it->iterators + query_it->length - 1;
+  return (QueryIteratorStartResult){
+      .it = it,
+      .status = tuple_iterator_reset(it),
+  };
 }
 
 // ----- Query -----

@@ -141,7 +141,6 @@ typedef struct
   RelationId relation_id;
   size_t buffer_index;
   int16_t tuple_index;
-  PhysicalRelationIteratorStatus status;
 
   ColumnsLength tuple_length;
   const ColumnType *types;
@@ -151,23 +150,26 @@ typedef struct
   int16_t deleted_variable_data;
 } PhysicalRelationIterator;
 
-PhysicalRelationIterator physical_relation_iterate_tuples(
+PhysicalRelationIterator physical_relation_iterator(
     DiskBufferPool *pool,
     RelationId id,
     ColumnsLength tuple_length,
     const ColumnType *types);
 
-PhysicalRelationIterator physical_relation_iterate_blocks(
-    DiskBufferPool *pool,
-    RelationId id,
-    ColumnsLength tuple_length,
-    const ColumnType *types);
+PhysicalRelationIteratorStatus
+physical_relation_iterate_blocks(PhysicalRelationIterator *it);
 
-void physical_relation_iterator_next_tuple(PhysicalRelationIterator *it);
+PhysicalRelationIteratorStatus
+physical_relation_iterate_tuples(PhysicalRelationIterator *it);
 
-void physical_relation_iterator_next_block(PhysicalRelationIterator *it);
+PhysicalRelationIteratorStatus
+physical_relation_iterator_next_tuple(PhysicalRelationIterator *it);
 
-void physical_relation_iterator_new_block(PhysicalRelationIterator *it);
+PhysicalRelationIteratorStatus
+physical_relation_iterator_next_block(PhysicalRelationIterator *it);
+
+PhysicalRelationIteratorStatus
+physical_relation_iterator_new_block(PhysicalRelationIterator *it);
 
 Tuple physical_relation_iterator_get(PhysicalRelationIterator *it);
 
