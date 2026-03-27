@@ -3,6 +3,8 @@
 This is a learning project to mess around with a basic implementation of a relational database.
 The goal of this project is not to even reach close to feature parity with a production database, but just to explore what machinery needs to be put in place to have a somewhat functional database with the expected features.
 
+Another goal of the project was to think about the specifics of the implementation and this is why I used C and strived to even use a minimal set of functions from the C standard library and no dependencies. I have never programmed C professionally so the style might leave a lot to be desired.
+
 ## Physical layer
 
 ### Data layout
