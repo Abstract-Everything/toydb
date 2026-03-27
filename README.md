@@ -56,7 +56,7 @@ Implement some constraints on tuples inside relations
 
 ### Transactions
 
-- \[ \] Log to record all data changes made by a transaction and have an ability to rollback
+- \[x\] Log to record all data changes made by a transaction and have an ability to rollback and recover from crashes
 
 #### Concurrency
 

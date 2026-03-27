@@ -18,6 +18,7 @@ typedef enum
 
 LogicalRelationCreateError logical_relation_create(
     DiskBufferPool *pool,
+    WriteAheadLog *log,
     StringSlice relation_names,
     StringSlice const *names,
     ColumnType const *types,
@@ -30,10 +31,12 @@ typedef enum
   LOGICAL_RELATION_DROP_OUT_OF_MEMORY,
   LOGICAL_RELATION_DROP_NOT_FOUND,
   LOGICAL_RELATION_DROP_IO,
+  LOGICAL_RELATION_DROP_PROGRAM_ERROR,
+  LOGICAL_RELATION_DROP_BUFFER_POOL_FULL,
 } LogicalRelationDropError;
 
-LogicalRelationDropError
-logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name);
+LogicalRelationDropError logical_relation_drop(
+    DiskBufferPool *pool, WriteAheadLog *log, StringSlice relation_name);
 
 typedef enum
 {
@@ -46,10 +49,14 @@ typedef enum
   LOGICAL_RELATION_INSERT_TUPLE_TOO_BIG,
   LOGICAL_RELATION_INSERT_TUPLE_BUFFER_POOL_FULL,
   LOGICAL_RELATION_INSERT_TUPLE_PRIMARY_KEY_VIOLATION,
+  LOGICAL_RELATION_INSERT_TUPLE_PROGRAM_ERROR,
 } LogicalRelationInsertTupleError;
 
 LogicalRelationInsertTupleError logical_relation_insert_tuple(
-    DiskBufferPool *pool, StringSlice relation_name, Tuple tuple);
+    DiskBufferPool *pool,
+    WriteAheadLog *log,
+    StringSlice relation_name,
+    Tuple tuple);
 
 typedef enum
 {
@@ -57,16 +64,45 @@ typedef enum
   LOGICAL_RELATION_DELETE_TUPLES_OUT_OF_MEMORY,
   LOGICAL_RELATION_DELETE_TUPLES_NOT_FOUND,
   LOGICAL_RELATION_DELETE_TUPLES_IO,
-  LOGICAL_RELATION_DELETE_TUPLES_TUPLE_LENGTH_MISMATCH,
   LOGICAL_RELATION_DELETE_TUPLES_COLUMN_TYPE_MISMATCH,
+  LOGICAL_RELATION_DELETE_TUPLES_PROGRAM_ERROR,
+  LOGICAL_RELATION_DELETE_TUPLES_BUFFER_POOL_FULL,
 } LogicalRelationDeleteTuplesError;
 
 LogicalRelationDeleteTuplesError logical_relation_delete_tuples(
     DiskBufferPool *pool,
+    WriteAheadLog *log,
     StringSlice relation_name,
     // TDOO: take column name instead of index
-    ColumnsLength *column_indices,
+    const bool32 *compare_column,
     Tuple tuple);
+
+typedef enum
+{
+  LOGICAL_RELATION_RECOVER_OK,
+  LOGICAL_RELATION_RECOVER_PROGRAM_ERROR,
+  LOGICAL_RELATION_RECOVER_IO,
+  LOGICAL_RELATION_RECOVER_OUT_OF_MEMORY,
+  LOGICAL_RELATION_RECOVER_BUFFER_POOL_FULL,
+} LogicalRelationRecoverError;
+
+LogicalRelationRecoverError logical_recover(
+    DiskBufferPool *pool,
+    WriteAheadLog *log,
+    void *memory,
+    size_t memory_length);
+
+typedef enum
+{
+  LOGICAL_RELATION_UNDO_OK,
+  LOGICAL_RELATION_UNDO_PROGRAM_ERROR,
+  LOGICAL_RELATION_UNDO_IO,
+  LOGICAL_RELATION_UNDO_OUT_OF_MEMORY,
+  LOGICAL_RELATION_UNDO_BUFFER_POOL_FULL,
+} LogicalRelationUndoError;
+
+LogicalRelationUndoError
+logical_relation_undo(DiskBufferPool *pool, WalIterator *it);
 
 // ----- Logical Relation -----
 
@@ -185,6 +221,8 @@ typedef enum
   QUERY_ITERATOR_COLUMN_NOT_FOUND,
   QUERY_ITERATOR_OPERATOR_TYPE_MISMATCH,
   QUERY_ITERATOR_READING_DISK,
+  QUERY_ITERATOR_PROGRAM_ERROR,
+  QUERY_ITERATOR_BUFFER_POOL_FULL,
 } QueryIteratorError;
 
 QueryIteratorError query_iterator_new(

@@ -131,6 +131,7 @@ internal bool32 tuple_violates_primary_key(
 
 internal LogicalRelationInsertTupleError insert_tuple(
     DiskBufferPool *pool,
+    WriteAheadLog *log,
     RelationId relation_id,
     ColumnsLength tuple_length,
     const ColumnType *types,
@@ -158,25 +159,18 @@ internal LogicalRelationInsertTupleError insert_tuple(
   }
 
   bool32 empty_block_visited = false;
-  LogicalRelationInsertTupleError error = LOGICAL_RELATION_INSERT_TUPLE_TOO_BIG;
 
   PhysicalRelationIterator it =
       physical_relation_iterator(pool, relation_id, tuple_length, types);
 
-  PhysicalRelationIteratorStatus status = physical_relation_iterate_blocks(&it);
+  PhysicalRelationIteratorStatus status =
+      physical_relation_iterator_open(&it, 0);
 
-  for (; status == PHYSICAL_RELATION_ITERATOR_STATUS_OK
-         && error != LOGICAL_RELATION_INSERT_TUPLE_OK;
+  for (; status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
        status = physical_relation_iterator_next_block(&it))
   {
-    switch (physical_relation_iterator_insert(&it, tuple))
+    if (physical_relation_iterator_insert_tuple_fits(&it, tuple))
     {
-    case PHYSICAL_RELATION_INSERT_TUPLE_OK:
-      error = LOGICAL_RELATION_INSERT_TUPLE_OK;
-      break;
-
-    case PHYSICAL_RELATION_INSERT_TUPLE_TOO_BIG:
-      error = LOGICAL_RELATION_INSERT_TUPLE_TOO_BIG;
       break;
     }
 
@@ -184,33 +178,26 @@ internal LogicalRelationInsertTupleError insert_tuple(
         empty_block_visited || physical_relation_iterator_is_block_empty(&it);
   }
 
+  LogicalRelationInsertTupleError error = LOGICAL_RELATION_INSERT_TUPLE_OK;
+
   switch (status)
   {
   case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
-    assert(false);
     break;
 
   case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
-    break;
-
-  case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
-    error = LOGICAL_RELATION_INSERT_TUPLE_BUFFER_POOL_FULL;
-    break;
-
-  case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
-  case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
-    error = LOGICAL_RELATION_INSERT_TUPLE_IO;
-    break;
-  }
-
-  // If an empty block insert has already been attempted creating a new block
-  // will fail since it will have the same space available
-  if (error != LOGICAL_RELATION_INSERT_TUPLE_OK && !empty_block_visited)
   {
+    // If an empty block insert has already been attempted creating a new block
+    // will fail since it will have the same space available
+    if (empty_block_visited)
+    {
+      error = LOGICAL_RELATION_INSERT_TUPLE_TOO_BIG;
+      break;
+    }
+
     switch (physical_relation_iterator_new_block(&it))
     {
     case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
-      error = LOGICAL_RELATION_INSERT_TUPLE_OK;
       break;
 
     case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
@@ -226,15 +213,39 @@ internal LogicalRelationInsertTupleError insert_tuple(
       error = LOGICAL_RELATION_INSERT_TUPLE_IO;
       break;
     }
+  }
+  break;
 
-    switch (physical_relation_iterator_insert(&it, tuple))
+  case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+    error = LOGICAL_RELATION_INSERT_TUPLE_BUFFER_POOL_FULL;
+    break;
+
+  case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
+    error = LOGICAL_RELATION_INSERT_TUPLE_IO;
+    break;
+  }
+
+  if (error == LOGICAL_RELATION_INSERT_TUPLE_OK)
+  {
+    WalWriteResult wal_result = wal_write_tuple_entry(
+        log,
+        WAL_ENTRY_INSERT_TUPLE,
+        relation_id,
+        physical_relation_iterator_block_index(&it),
+        tuple);
+    switch (wal_result.error)
     {
-    case PHYSICAL_RELATION_INSERT_TUPLE_OK:
+    case WAL_WRITE_ENTRY_OK:
+      physical_relation_iterator_insert(&it, wal_result.lsn, tuple);
       error = LOGICAL_RELATION_INSERT_TUPLE_OK;
       break;
 
-    case PHYSICAL_RELATION_INSERT_TUPLE_TOO_BIG:
-      error = LOGICAL_RELATION_INSERT_TUPLE_TOO_BIG;
+    case WAL_WRITE_ENTRY_PROGRAM_ERROR:
+    case WAL_WRITE_ENTRY_TOO_BIG:
+    case WAL_WRITE_ENTRY_WRITING_SEGMENT:
+    case WAL_WRITE_ENTRY_READING_SEGMENT:
+      error = LOGICAL_RELATION_INSERT_TUPLE_IO;
       break;
     }
   }
@@ -246,72 +257,92 @@ internal LogicalRelationInsertTupleError insert_tuple(
 
 internal LogicalRelationDeleteTuplesError delete_tuples(
     DiskBufferPool *pool,
+    WriteAheadLog *log,
     RelationId relation_id,
     ColumnsLength tuple_length,
     const ColumnType *types,
-    // TDOO: take column names instead of indices
-    ColumnsLength *column_indices,
+    const bool32 *compare_column,
     Tuple tuple)
 {
   assert(pool != NULL);
 
   for (ColumnsLength i = 0; i < tuple.length; ++i)
   {
-    for (ColumnsLength j = i + 1; j < tuple.length; ++j)
-    {
-      assert(column_indices[i] != column_indices[j]);
-    }
-  }
-
-  for (ColumnsLength i = 0; i < tuple.length; ++i)
-  {
-    if (column_indices[i] >= tuple_length)
-    {
-      return LOGICAL_RELATION_DELETE_TUPLES_TUPLE_LENGTH_MISMATCH;
-    }
-  }
-
-  for (ColumnsLength i = 0; i < tuple.length; ++i)
-  {
-    ColumnsLength column = column_indices[i];
-    if (tuple.types[column] != types[column])
+    if (tuple.types[i] != types[i])
     {
       return LOGICAL_RELATION_DELETE_TUPLES_COLUMN_TYPE_MISMATCH;
     }
   }
+
+  LogicalRelationDeleteTuplesError error = LOGICAL_RELATION_DELETE_TUPLES_IO;
 
   PhysicalRelationIterator it =
       physical_relation_iterator(pool, relation_id, tuple_length, types);
 
   PhysicalRelationIteratorStatus status = physical_relation_iterate_tuples(&it);
 
-  for (; status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
-       status = physical_relation_iterator_next_tuple(&it))
+  while (status == PHYSICAL_RELATION_ITERATOR_STATUS_OK)
   {
     Tuple stored_tuple = physical_relation_iterator_get(&it);
 
     bool32 delete = true;
     for (ColumnsLength i = 0; i < tuple.length && delete; ++i)
     {
-      ColumnsLength column = column_indices[i];
-      delete = column_value_eq(
-          tuple.types[column],
-          tuple_get(stored_tuple, column),
-          tuple_get(tuple, i));
+      if (compare_column[i])
+      {
+        delete = column_value_eq(
+            tuple.types[i], tuple_get(stored_tuple, i), tuple_get(tuple, i));
+      }
     }
 
     if (delete)
     {
-      physical_relation_iterator_delete(&it);
+      WalWriteResult delete_result = wal_write_tuple_entry(
+          log,
+          WAL_ENTRY_DELETE_TUPLE,
+          relation_id,
+          physical_relation_iterator_block_index(&it),
+          stored_tuple);
+      switch (delete_result.error)
+      {
+      case WAL_WRITE_ENTRY_OK:
+        status = physical_relation_iterator_delete(&it, delete_result.lsn);
+        error = LOGICAL_RELATION_DELETE_TUPLES_OK;
+        break;
+
+      case WAL_WRITE_ENTRY_PROGRAM_ERROR:
+      case WAL_WRITE_ENTRY_TOO_BIG:
+      case WAL_WRITE_ENTRY_WRITING_SEGMENT:
+      case WAL_WRITE_ENTRY_READING_SEGMENT:
+        error = LOGICAL_RELATION_DELETE_TUPLES_IO;
+        break;
+      }
+    }
+    else
+    {
+      status = physical_relation_iterator_next_tuple(&it);
     }
   }
-
-  // TODO: Use transactions to handle failure
-  assert(status == PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS);
-
   physical_relation_iterator_close(&it);
 
-  return LOGICAL_RELATION_DELETE_TUPLES_OK;
+  if (error != LOGICAL_RELATION_DELETE_TUPLES_OK)
+  {
+    return error;
+  }
+
+  switch (status)
+  {
+  case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
+    return LOGICAL_RELATION_DELETE_TUPLES_OK;
+
+  case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
+    return LOGICAL_RELATION_DELETE_TUPLES_IO;
+
+  case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+    return LOGICAL_RELATION_DELETE_TUPLES_BUFFER_POOL_FULL;
+  }
 }
 
 typedef struct
@@ -349,6 +380,72 @@ query_relation_id_by_name(DiskBufferPool *pool, StringSlice name)
   return (QueryRelationIdByNameResult){
       .status = status,
       .relation_id = relation_id,
+  };
+}
+
+typedef struct
+{
+  String name;
+  PhysicalRelationIteratorStatus status;
+} QueryRelationNameByIdResult;
+
+internal QueryRelationNameByIdResult
+query_relation_name_by_id(DiskBufferPool *pool, RelationId id)
+{
+  String name = {};
+
+  if (id == RELATIONS_RELATION_ID)
+  {
+    assert(
+        string_from_string_slice(
+            string_slice_from_ptr(relations_relation_name), &name)
+        == ALLOCATE_OK);
+
+    return (QueryRelationNameByIdResult){
+        .status = PHYSICAL_RELATION_ITERATOR_STATUS_OK,
+        .name = name,
+    };
+  }
+
+  if (id == RELATION_COLUMNS_RELATION_ID)
+  {
+    assert(
+        string_from_string_slice(
+            string_slice_from_ptr(relation_columns_relation_name), &name)
+        == ALLOCATE_OK);
+
+    return (QueryRelationNameByIdResult){
+        .status = PHYSICAL_RELATION_ITERATOR_STATUS_OK,
+        .name = name,
+    };
+  }
+
+  PhysicalRelationIterator it = physical_relation_iterator(
+      pool,
+      RELATIONS_RELATION_ID,
+      ARRAY_LENGTH(relations_types),
+      relations_types);
+
+  PhysicalRelationIteratorStatus status = physical_relation_iterate_tuples(&it);
+
+  for (; status == PHYSICAL_RELATION_ITERATOR_STATUS_OK;
+       status = physical_relation_iterator_next_tuple(&it))
+  {
+    Tuple tuple = physical_relation_iterator_get(&it);
+
+    if (id == tuple_get_integer(tuple, 0))
+    {
+      assert(
+          string_from_string_slice(tuple_get_string(tuple, 1), &name)
+          == ALLOCATE_OK);
+      break;
+    }
+  }
+  physical_relation_iterator_close(&it);
+
+  return (QueryRelationNameByIdResult){
+      .status = status,
+      .name = name,
   };
 }
 
@@ -441,6 +538,8 @@ typedef enum
   RELATION_METADATA_OUT_OF_MEMORY,
   RELATION_METADATA_RELATION_NOT_FOUND,
   RELATION_METADATA_IO,
+  RELATION_METADATA_PROGRAM_ERROR,
+  RELATION_METADATA_BUFFER_POOL_FULL,
 } RelationMetadataError;
 
 typedef struct
@@ -568,6 +667,8 @@ internal RelationMetadataResult relation_metadata(
     case RELATION_METADATA_OK:
     case RELATION_METADATA_OUT_OF_MEMORY:
     case RELATION_METADATA_IO:
+    case RELATION_METADATA_PROGRAM_ERROR:
+    case RELATION_METADATA_BUFFER_POOL_FULL:
       return result;
 
     case RELATION_METADATA_RELATION_NOT_FOUND:
@@ -753,6 +854,51 @@ internal RelationMetadataResult relation_metadata(
   };
 }
 
+internal RelationMetadataResult relation_metadata_from_id(
+    DiskBufferPool *pool,
+    RelationId relation_id,
+    bool32 write_names,
+    bool32 write_primary_keys)
+{
+  QueryRelationNameByIdResult query_result =
+      query_relation_name_by_id(pool, relation_id);
+
+  RelationMetadataError error = RELATION_METADATA_OK;
+  switch (query_result.status)
+  {
+  case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
+    break;
+
+  case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
+    error = RELATION_METADATA_RELATION_NOT_FOUND;
+    break;
+
+  case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+  case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
+    error = RELATION_METADATA_IO;
+    break;
+
+  case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+    error = RELATION_METADATA_BUFFER_POOL_FULL;
+    break;
+  }
+
+  if (error != RELATION_METADATA_OK)
+  {
+    return (RelationMetadataResult){.error = error};
+  }
+
+  RelationMetadataResult result = relation_metadata(
+      pool,
+      string_slice_from_string(query_result.name),
+      write_names,
+      write_primary_keys);
+
+  string_destroy(&query_result.name);
+
+  return result;
+}
+
 internal void deallocate_relation_metadata(RelationMetadataResult *result)
 {
 
@@ -796,9 +942,14 @@ bool32 relation_create_schema_relations(DiskBufferPool *pool)
       relation_columns_primary_keys,
       ARRAY_LENGTH(relation_columns_primary_keys)));
 
-  // TODO: Use logical_relation_create or a subset of it to enforce checks
-  DiskResourceCreate error =
-      physical_relation_create(pool, RELATIONS_RELATION_ID, false);
+  DiskResourceCreateError error = disk_buffer_pool_resource_create(
+      pool,
+      (DiskResource){
+          .type = RESOURCE_TYPE_RELATION,
+          .id = RELATIONS_RELATION_ID,
+      },
+      false);
+
   switch (error)
   {
   case DISK_RESOURCE_CREATE_OK:
@@ -813,8 +964,14 @@ bool32 relation_create_schema_relations(DiskBufferPool *pool)
     return false;
   }
 
-  // TODO: Use logical_relation_create or a subset of it to enforce checks
-  error = physical_relation_create(pool, RELATION_COLUMNS_RELATION_ID, false);
+  error = disk_buffer_pool_resource_create(
+      pool,
+      (DiskResource){
+          .type = RESOURCE_TYPE_RELATION,
+          .id = RELATION_COLUMNS_RELATION_ID,
+      },
+      false);
+
   switch (error)
   {
   case DISK_RESOURCE_CREATE_OK:
@@ -835,6 +992,7 @@ bool32 relation_create_schema_relations(DiskBufferPool *pool)
 // TODO: Check that column names are unique
 LogicalRelationCreateError logical_relation_create(
     DiskBufferPool *pool,
+    WriteAheadLog *log,
     StringSlice relation_name,
     StringSlice const *names,
     ColumnType const *types,
@@ -872,7 +1030,30 @@ LogicalRelationCreateError logical_relation_create(
     return LOGICAL_RELATION_CREATE_NO_PRIMARY_KEY;
   }
 
-  switch (physical_relation_create(pool, result.relation_id, true))
+  WalWriteResult write_result = wal_write_entry(
+      log,
+      (WalEntry){
+          .header.tag = WAL_ENTRY_CREATE_RELATION_FILE,
+          .payload.relation_id = result.relation_id,
+      },
+      0,
+      NULL);
+  switch (write_result.error)
+  {
+  case WAL_WRITE_ENTRY_OK:
+    break;
+
+  case WAL_WRITE_ENTRY_PROGRAM_ERROR:
+  case WAL_WRITE_ENTRY_TOO_BIG:
+  case WAL_WRITE_ENTRY_WRITING_SEGMENT:
+  case WAL_WRITE_ENTRY_READING_SEGMENT:
+    return LOGICAL_RELATION_CREATE_IO;
+  }
+
+  switch (disk_buffer_pool_resource_create(
+      pool,
+      (DiskResource){.type = RESOURCE_TYPE_RELATION, .id = result.relation_id},
+      true))
   {
   case DISK_RESOURCE_CREATE_OK:
     break;
@@ -914,6 +1095,7 @@ LogicalRelationCreateError logical_relation_create(
 
     insert_error = insert_tuple(
         pool,
+        log,
         RELATION_COLUMNS_RELATION_ID,
         ARRAY_LENGTH(relation_column_values),
         relation_columns_types,
@@ -942,6 +1124,7 @@ LogicalRelationCreateError logical_relation_create(
 
     insert_error = insert_tuple(
         pool,
+        log,
         RELATIONS_RELATION_ID,
         ARRAY_LENGTH(relations_values),
         relations_types,
@@ -954,14 +1137,11 @@ LogicalRelationCreateError logical_relation_create(
             relations_values));
   }
 
-  // TODO: Use transactions to handle failure
-  assert(insert_error == LOGICAL_RELATION_INSERT_TUPLE_OK);
-
   return LOGICAL_RELATION_CREATE_OK;
 }
 
-LogicalRelationDropError
-logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name)
+LogicalRelationDropError logical_relation_drop(
+    DiskBufferPool *pool, WriteAheadLog *log, StringSlice relation_name)
 {
   assert(pool != NULL);
   assert(relation_name.length > 0);
@@ -982,6 +1162,8 @@ logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name)
     return LOGICAL_RELATION_DROP_NOT_FOUND;
   }
 
+  LogicalRelationDeleteTuplesError error = LOGICAL_RELATION_DELETE_TUPLES_OK;
+  if (error == LOGICAL_RELATION_DELETE_TUPLES_OK)
   {
     ColumnsLength tuple_length = 1;
     int16_t column_index = 0;
@@ -992,18 +1174,17 @@ logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name)
     size_t data_length = tuple_data_length(tuple_length, &type, &value);
     char data[data_length] = {};
 
-    LogicalRelationDeleteTuplesError error = delete_tuples(
+    error = delete_tuples(
         pool,
+        log,
         RELATION_COLUMNS_RELATION_ID,
         ARRAY_LENGTH(relation_columns_types),
         relation_columns_types,
-        &column_index,
+        relation_columns_primary_keys,
         tuple_from_data(tuple_length, &type, data_length, data, &value));
-
-    // TODO: Use transactions to handle failure
-    assert(error == LOGICAL_RELATION_DELETE_TUPLES_OK);
   }
 
+  if (error == LOGICAL_RELATION_DELETE_TUPLES_OK)
   {
     ColumnsLength tuple_length = 1;
     int16_t column_index = 0;
@@ -1014,23 +1195,90 @@ logical_relation_drop(DiskBufferPool *pool, StringSlice relation_name)
     size_t data_length = tuple_data_length(tuple_length, &type, &value);
     char data[data_length] = {};
 
-    LogicalRelationDeleteTuplesError error = delete_tuples(
+    error = delete_tuples(
         pool,
+        log,
         RELATIONS_RELATION_ID,
         ARRAY_LENGTH(relations_types),
         relations_types,
-        &column_index,
+        relations_primary_keys,
         tuple_from_data(tuple_length, &type, data_length, data, &value));
-
-    // TODO: Use transactions to handle failure
-    assert(error == LOGICAL_RELATION_DELETE_TUPLES_OK);
   }
 
-  return LOGICAL_RELATION_DROP_OK;
+  if (error != LOGICAL_RELATION_DELETE_TUPLES_OK)
+  {
+    switch (error)
+    {
+    case LOGICAL_RELATION_DELETE_TUPLES_OK:
+      break;
+
+    case LOGICAL_RELATION_DELETE_TUPLES_OUT_OF_MEMORY:
+      return LOGICAL_RELATION_DROP_OUT_OF_MEMORY;
+
+    case LOGICAL_RELATION_DELETE_TUPLES_NOT_FOUND:
+      return LOGICAL_RELATION_DROP_NOT_FOUND;
+
+    case LOGICAL_RELATION_DELETE_TUPLES_IO:
+      return LOGICAL_RELATION_DROP_IO;
+
+    case LOGICAL_RELATION_DELETE_TUPLES_COLUMN_TYPE_MISMATCH:
+    case LOGICAL_RELATION_DELETE_TUPLES_PROGRAM_ERROR:
+      return LOGICAL_RELATION_DROP_PROGRAM_ERROR;
+
+    case LOGICAL_RELATION_DELETE_TUPLES_BUFFER_POOL_FULL:
+      return LOGICAL_RELATION_DROP_BUFFER_POOL_FULL;
+    }
+  }
+
+  WalWriteResult write_result = wal_write_entry(
+      log,
+      (WalEntry){
+          .header.tag = WAL_ENTRY_DELETE_RELATION_FILE,
+          .payload.relation_id = result.relation_id,
+      },
+      0,
+      NULL);
+
+  switch (write_result.error)
+  {
+  case WAL_WRITE_ENTRY_OK:
+    break;
+
+  case WAL_WRITE_ENTRY_PROGRAM_ERROR:
+  case WAL_WRITE_ENTRY_TOO_BIG:
+  case WAL_WRITE_ENTRY_WRITING_SEGMENT:
+  case WAL_WRITE_ENTRY_READING_SEGMENT:
+    return LOGICAL_RELATION_DROP_IO;
+  }
+
+  switch (disk_buffer_pool_resource_soft_delete(
+      pool,
+      (DiskResource){
+          .type = RESOURCE_TYPE_RELATION,
+          .id = result.relation_id,
+      }))
+  {
+  case DISK_RESOURCE_SOFT_DELETE_OK:
+    return LOGICAL_RELATION_DROP_OK;
+
+  case DISK_RESOURCE_SOFT_DELETE_NO_MEMORY:
+    return LOGICAL_RELATION_DROP_OUT_OF_MEMORY;
+
+  case DISK_RESOURCE_SOFT_DELETE_TEMPORARAY_FAILURE:
+  case DISK_RESOURCE_SOFT_DELETE_DENIED:
+  case DISK_RESOURCE_SOFT_DELETE_DISK_FULL:
+    return LOGICAL_RELATION_DROP_IO;
+
+  case DISK_RESOURCE_SOFT_DELETE_PROGRAM_ERROR:
+    return LOGICAL_RELATION_DROP_PROGRAM_ERROR;
+  }
 }
 
 LogicalRelationInsertTupleError logical_relation_insert_tuple(
-    DiskBufferPool *pool, StringSlice relation_name, Tuple tuple)
+    DiskBufferPool *pool,
+    WriteAheadLog *log,
+    StringSlice relation_name,
+    Tuple tuple)
 {
   assert(pool != NULL);
 
@@ -1050,6 +1298,12 @@ LogicalRelationInsertTupleError logical_relation_insert_tuple(
 
   case RELATION_METADATA_IO:
     return LOGICAL_RELATION_INSERT_TUPLE_IO;
+
+  case RELATION_METADATA_PROGRAM_ERROR:
+    return LOGICAL_RELATION_INSERT_TUPLE_PROGRAM_ERROR;
+
+  case RELATION_METADATA_BUFFER_POOL_FULL:
+    return LOGICAL_RELATION_INSERT_TUPLE_BUFFER_POOL_FULL;
   }
 
   if (result.relation_id < RESERVED_RELATION_IDS)
@@ -1060,6 +1314,7 @@ LogicalRelationInsertTupleError logical_relation_insert_tuple(
 
   LogicalRelationInsertTupleError insert_error = insert_tuple(
       pool,
+      log,
       result.relation_id,
       result.tuple_length,
       result.types,
@@ -1073,9 +1328,10 @@ LogicalRelationInsertTupleError logical_relation_insert_tuple(
 
 LogicalRelationDeleteTuplesError logical_relation_delete_tuples(
     DiskBufferPool *pool,
+    WriteAheadLog *log,
     StringSlice relation_name,
     // TDOO: take column names instead of indices
-    ColumnsLength *column_indices,
+    const bool32 *compare_column,
     Tuple tuple)
 {
   assert(pool != NULL);
@@ -1096,6 +1352,12 @@ LogicalRelationDeleteTuplesError logical_relation_delete_tuples(
 
   case RELATION_METADATA_IO:
     return LOGICAL_RELATION_DELETE_TUPLES_IO;
+
+  case RELATION_METADATA_PROGRAM_ERROR:
+    return LOGICAL_RELATION_DELETE_TUPLES_PROGRAM_ERROR;
+
+  case RELATION_METADATA_BUFFER_POOL_FULL:
+    return LOGICAL_RELATION_DELETE_TUPLES_BUFFER_POOL_FULL;
   }
 
   if (result.relation_id < RESERVED_RELATION_IDS)
@@ -1106,18 +1368,648 @@ LogicalRelationDeleteTuplesError logical_relation_delete_tuples(
 
   LogicalRelationDeleteTuplesError error = delete_tuples(
       pool,
+      log,
       result.relation_id,
       result.tuple_length,
       result.types,
-      column_indices,
+      compare_column,
       tuple);
-
-  // TODO: Use transactions to handle failure
-  assert(error == LOGICAL_RELATION_DELETE_TUPLES_OK);
 
   deallocate_relation_metadata(&result);
 
-  return LOGICAL_RELATION_DELETE_TUPLES_OK;
+  return error;
+}
+
+LogicalRelationRecoverError logical_recover(
+    DiskBufferPool *pool,
+    WriteAheadLog *log,
+    void *memory,
+    size_t memory_length)
+{
+  WalWriteResult write_result = wal_recover(log, memory, memory_length);
+  switch (write_result.error)
+  {
+  case WAL_WRITE_ENTRY_OK:
+    break;
+
+  case WAL_WRITE_ENTRY_PROGRAM_ERROR:
+  case WAL_WRITE_ENTRY_TOO_BIG:
+    assert(false);
+    return LOGICAL_RELATION_RECOVER_PROGRAM_ERROR;
+
+  case WAL_WRITE_ENTRY_WRITING_SEGMENT:
+  case WAL_WRITE_ENTRY_READING_SEGMENT:
+    return LOGICAL_RELATION_RECOVER_IO;
+  }
+
+  WalIterator it = wal_iterate(log, memory, memory_length);
+  WalIteratorStatus it_status = wal_iterator_open(&it, write_result.lsn);
+
+  if (it_status == WAL_ITERATOR_STATUS_OK)
+  {
+    // TODO: Algorithm sucks, we should keep a list of LSNs and only redo
+    // those, not have to iterate all over the place to check whether this LSN
+    // set should be done or not
+    while (wal_iterator_previous(&it) == WAL_ITERATOR_STATUS_OK) {}
+  }
+
+  for (; it_status == WAL_ITERATOR_STATUS_OK;
+       it_status = wal_iterator_next(&it))
+  {
+    enum
+    {
+      RECOVER_FOUND_FIRST_ENTRY_SENTINEL,
+      RECOVER_FOUND_ABORT,
+      RECOVER_FOUND_COMMIT,
+      RECOVER_FOUND_UNDO,
+      RECOVER_NOT_FOUND,
+    } recover_status = RECOVER_NOT_FOUND;
+
+    LogSequenceNumber transaction_lsn = it.current;
+
+    while (recover_status == RECOVER_NOT_FOUND)
+    {
+      switch (wal_iterator_get(&it)->header.tag)
+      {
+      case WAL_ENTRY_FIRST_ENTRY_SENTINEL:
+        recover_status = RECOVER_FOUND_FIRST_ENTRY_SENTINEL;
+        break;
+
+      case WAL_ENTRY_UNDO:
+        recover_status = RECOVER_FOUND_UNDO;
+        break;
+
+      case WAL_ENTRY_COMMIT:
+        recover_status = RECOVER_FOUND_COMMIT;
+        break;
+
+      case WAL_ENTRY_ABORT:
+        recover_status = RECOVER_FOUND_ABORT;
+        break;
+
+      case WAL_ENTRY_START:
+        assert(lsn_cmp(it.current, transaction_lsn) == CMP_EQUAL);
+
+      case WAL_ENTRY_CREATE_RELATION_FILE:
+      case WAL_ENTRY_DELETE_RELATION_FILE:
+      case WAL_ENTRY_INSERT_TUPLE:
+      case WAL_ENTRY_DELETE_TUPLE:
+        it_status = wal_iterator_next(&it);
+        break;
+      }
+    }
+
+    assert(
+        recover_status != RECOVER_NOT_FOUND
+        && (it_status == WAL_ITERATOR_STATUS_NO_MORE_ENTRIES
+            || it_status == WAL_ITERATOR_STATUS_OK));
+
+    switch (recover_status)
+    {
+    case RECOVER_NOT_FOUND:
+    case RECOVER_FOUND_FIRST_ENTRY_SENTINEL:
+      assert(false);
+      // TODO return error
+      break;
+
+    case RECOVER_FOUND_UNDO:
+      logical_relation_undo(pool, &it);
+      break;
+
+    case RECOVER_FOUND_ABORT:
+      break;
+
+    case RECOVER_FOUND_COMMIT:
+    {
+      it_status = wal_iterator_open(&it, transaction_lsn);
+      assert(wal_iterator_get(&it)->header.tag == WAL_ENTRY_START);
+
+      if (it_status != WAL_ITERATOR_STATUS_OK)
+      {
+        break;
+      }
+
+      it_status = wal_iterator_next(&it);
+
+      for (bool32 loop = true; loop && it_status == WAL_ITERATOR_STATUS_OK;
+           it_status = wal_iterator_next(&it))
+      {
+        WalEntry *entry = wal_iterator_get(&it);
+        switch (entry->header.tag)
+        {
+        case WAL_ENTRY_FIRST_ENTRY_SENTINEL:
+        case WAL_ENTRY_ABORT:
+        case WAL_ENTRY_UNDO:
+        case WAL_ENTRY_START:
+          assert(false);
+          break;
+
+        case WAL_ENTRY_COMMIT:
+          loop = false;
+          break;
+
+        case WAL_ENTRY_CREATE_RELATION_FILE:
+          switch (disk_buffer_pool_resource_create(
+              pool,
+              (DiskResource){
+                  .type = RESOURCE_TYPE_RELATION,
+                  .id = entry->payload.relation_id,
+              },
+              false))
+          {
+          case DISK_RESOURCE_CREATE_OK:
+            break;
+
+          case DISK_RESOURCE_CREATE_OPENING:
+          case DISK_RESOURCE_CREATE_STAT:
+          case DISK_RESOURCE_CREATE_TRUNCATING:
+          case DISK_RESOURCE_CREATE_CLOSING:
+            return LOGICAL_RELATION_RECOVER_IO;
+
+          case DISK_RESOURCE_CREATE_ALREADY_EXISTS:
+          case DISK_RESOURCE_CREATE_PROGRAM_ERROR:
+            return LOGICAL_RELATION_RECOVER_PROGRAM_ERROR;
+          }
+          break;
+
+        case WAL_ENTRY_DELETE_RELATION_FILE:
+          switch (disk_buffer_pool_resource_delete(
+              pool,
+              (DiskResource){
+                  .type = RESOURCE_TYPE_RELATION,
+                  .id = entry->payload.relation_id,
+              },
+              false))
+          {
+          case DISK_RESOURCE_DELETE_OK:
+            break;
+
+          case DISK_RESOURCE_DELETE_DENIED:
+          case DISK_RESOURCE_DELETE_TEMPORARAY_FAILURE:
+            return LOGICAL_RELATION_RECOVER_IO;
+
+          case DISK_RESOURCE_DELETE_NO_MEMORY:
+            return LOGICAL_RELATION_RECOVER_OUT_OF_MEMORY;
+
+          case DISK_RESOURCE_DELETE_PROGRAM_ERROR:
+            return LOGICAL_RELATION_RECOVER_PROGRAM_ERROR;
+          }
+          break;
+
+        case WAL_ENTRY_INSERT_TUPLE:
+        {
+          RelationMetadataResult result = relation_metadata_from_id(
+              pool, entry->payload.tuple.relation_id, false, false);
+
+          switch (result.error)
+          {
+          case RELATION_METADATA_OK:
+            break;
+
+          case RELATION_METADATA_RELATION_NOT_FOUND:
+          case RELATION_METADATA_PROGRAM_ERROR:
+            return LOGICAL_RELATION_RECOVER_PROGRAM_ERROR;
+
+          case RELATION_METADATA_BUFFER_POOL_FULL:
+            return LOGICAL_RELATION_RECOVER_BUFFER_POOL_FULL;
+
+          case RELATION_METADATA_OUT_OF_MEMORY:
+            return LOGICAL_RELATION_RECOVER_OUT_OF_MEMORY;
+
+          case RELATION_METADATA_IO:
+            return LOGICAL_RELATION_RECOVER_IO;
+          }
+
+          Tuple tuple = wal_iterator_get_tuple(&it, result.types);
+
+          PhysicalRelationIterator prit = physical_relation_iterator(
+              pool,
+              entry->payload.tuple.relation_id,
+              tuple.length,
+              tuple.types);
+
+          LogicalRelationRecoverError error = LOGICAL_RELATION_RECOVER_OK;
+          switch (physical_relation_iterator_open(
+              &prit, entry->payload.tuple.block))
+          {
+          case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
+            break;
+
+          case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
+          {
+            switch (physical_relation_iterator_new_block(&prit))
+            {
+            case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
+              break;
+
+            case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
+              assert(false);
+              break;
+
+            case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+              error = LOGICAL_RELATION_RECOVER_BUFFER_POOL_FULL;
+              break;
+
+            case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+            case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
+              error = LOGICAL_RELATION_RECOVER_IO;
+              break;
+            }
+
+            assert(
+                physical_relation_iterator_block_index(&prit)
+                == entry->payload.tuple.block);
+          }
+          break;
+
+          case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+          case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
+            error = LOGICAL_RELATION_RECOVER_IO;
+            break;
+
+          case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+            error = LOGICAL_RELATION_RECOVER_BUFFER_POOL_FULL;
+            break;
+          }
+
+          switch (
+              lsn_cmp(physical_relation_iterator_block_lsn(&prit), it.current))
+          {
+          case CMP_SMALLER:
+          {
+            assert(physical_relation_iterator_insert_tuple_fits(&prit, tuple));
+            physical_relation_iterator_insert(&prit, it.current, tuple);
+          }
+          break;
+
+          case CMP_EQUAL:
+          case CMP_GREATER:
+            break;
+          }
+
+          physical_relation_iterator_close(&prit);
+
+          deallocate_relation_metadata(&result);
+
+          if (error != LOGICAL_RELATION_RECOVER_OK)
+          {
+            return error;
+          }
+        }
+        break;
+
+        case WAL_ENTRY_DELETE_TUPLE:
+        {
+          RelationMetadataResult result = relation_metadata_from_id(
+              pool, entry->payload.tuple.relation_id, false, false);
+
+          switch (result.error)
+          {
+          case RELATION_METADATA_OK:
+            break;
+
+          case RELATION_METADATA_RELATION_NOT_FOUND:
+          case RELATION_METADATA_PROGRAM_ERROR:
+            return LOGICAL_RELATION_RECOVER_PROGRAM_ERROR;
+
+          case RELATION_METADATA_BUFFER_POOL_FULL:
+            return LOGICAL_RELATION_RECOVER_BUFFER_POOL_FULL;
+
+          case RELATION_METADATA_OUT_OF_MEMORY:
+            return LOGICAL_RELATION_RECOVER_OUT_OF_MEMORY;
+
+          case RELATION_METADATA_IO:
+            return LOGICAL_RELATION_RECOVER_IO;
+          }
+
+          Tuple tuple = wal_iterator_get_tuple(&it, result.types);
+          BlockIndex block = entry->payload.tuple.block;
+
+          PhysicalRelationIterator prit = physical_relation_iterator(
+              pool,
+              entry->payload.tuple.relation_id,
+              tuple.length,
+              tuple.types);
+
+          PhysicalRelationIteratorStatus prit_status =
+              physical_relation_iterator_open(
+                  &prit, entry->payload.tuple.block);
+
+          if (prit_status == PHYSICAL_RELATION_ITERATOR_STATUS_OK)
+          {
+            switch (lsn_cmp(
+                physical_relation_iterator_block_lsn(&prit), it.current))
+            {
+            case CMP_SMALLER:
+            {
+              Tuple stored_tuple = physical_relation_iterator_get(&prit);
+
+              bool32 delete = true;
+              for (ColumnsLength i = 0; i < tuple.length && delete; ++i)
+              {
+                delete = column_value_eq(
+                    tuple.types[i],
+                    tuple_get(stored_tuple, i),
+                    tuple_get(tuple, i));
+              }
+
+              if (delete)
+              {
+                prit_status =
+                    physical_relation_iterator_delete(&prit, it.current);
+              }
+            }
+            break;
+
+            case CMP_EQUAL:
+            case CMP_GREATER:
+              break;
+            }
+          }
+
+          physical_relation_iterator_close(&prit);
+
+          deallocate_relation_metadata(&result);
+
+          switch (prit_status)
+          {
+          case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
+            break;
+
+          case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
+            assert(false);
+            return LOGICAL_RELATION_RECOVER_PROGRAM_ERROR;
+
+          case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+          case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
+            return LOGICAL_RELATION_RECOVER_IO;
+
+          case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+            return LOGICAL_RELATION_RECOVER_BUFFER_POOL_FULL;
+          }
+        }
+        break;
+        }
+      }
+    }
+    break;
+    }
+  }
+
+  switch (it_status)
+  {
+  case WAL_ITERATOR_STATUS_OK:
+    assert(false);
+    return LOGICAL_RELATION_RECOVER_PROGRAM_ERROR;
+
+  case WAL_ITERATOR_STATUS_NO_MORE_ENTRIES:
+    return LOGICAL_RELATION_RECOVER_OK;
+
+  case WAL_ITERATOR_STATUS_ERROR:
+    assert(false);
+    return LOGICAL_RELATION_RECOVER_IO;
+  }
+}
+
+LogicalRelationUndoError
+logical_relation_undo(DiskBufferPool *pool, WalIterator *uit)
+{
+  assert(wal_iterator_get(uit)->header.tag == WAL_ENTRY_UNDO);
+
+  WalEntry *entry = wal_iterator_get(uit);
+  WalUndoEntry undo_entry = wal_iterator_get_undo_entry(uit);
+
+  switch (entry->payload.undo.tag)
+  {
+  case WAL_ENTRY_FIRST_ENTRY_SENTINEL:
+  case WAL_ENTRY_START:
+  case WAL_ENTRY_COMMIT:
+  case WAL_ENTRY_ABORT:
+  case WAL_ENTRY_UNDO:
+    assert(false);
+    return LOGICAL_RELATION_UNDO_PROGRAM_ERROR;
+
+  case WAL_ENTRY_CREATE_RELATION_FILE:
+    switch (disk_buffer_pool_resource_delete(
+        pool,
+        (DiskResource){
+            .type = RESOURCE_TYPE_RELATION,
+            .id = undo_entry.payload->relation_id,
+        },
+        false))
+    {
+    case DISK_RESOURCE_DELETE_OK:
+      return LOGICAL_RELATION_UNDO_OK;
+
+    case DISK_RESOURCE_DELETE_PROGRAM_ERROR:
+      return LOGICAL_RELATION_UNDO_PROGRAM_ERROR;
+
+    case DISK_RESOURCE_DELETE_DENIED:
+    case DISK_RESOURCE_DELETE_NO_MEMORY:
+    case DISK_RESOURCE_DELETE_TEMPORARAY_FAILURE:
+      return LOGICAL_RELATION_UNDO_IO;
+    }
+    break;
+
+  case WAL_ENTRY_DELETE_RELATION_FILE:
+    switch (disk_buffer_pool_resource_restore(
+        pool,
+        (DiskResource){
+            .type = RESOURCE_TYPE_RELATION,
+            .id = undo_entry.payload->relation_id,
+        }))
+    {
+    case DISK_RESOURCE_RESTORE_OK:
+      return LOGICAL_RELATION_UNDO_OK;
+
+    case DISK_RESOURCE_RESTORE_NO_MEMORY:
+      return LOGICAL_RELATION_UNDO_OUT_OF_MEMORY;
+
+    case DISK_RESOURCE_RESTORE_DENIED:
+    case DISK_RESOURCE_RESTORE_TEMPORARAY_FAILURE:
+    case DISK_RESOURCE_RESTORE_DISK_FULL:
+      return LOGICAL_RELATION_UNDO_IO;
+
+    case DISK_RESOURCE_RESTORE_PROGRAM_ERROR:
+      return LOGICAL_RELATION_UNDO_PROGRAM_ERROR;
+    }
+    break;
+
+  case WAL_ENTRY_INSERT_TUPLE:
+  {
+    RelationMetadataResult result = relation_metadata_from_id(
+        pool, undo_entry.payload->tuple.relation_id, false, false);
+
+    switch (result.error)
+    {
+    case RELATION_METADATA_OK:
+      break;
+
+    case RELATION_METADATA_RELATION_NOT_FOUND:
+    case RELATION_METADATA_PROGRAM_ERROR:
+      return LOGICAL_RELATION_UNDO_PROGRAM_ERROR;
+
+    case RELATION_METADATA_BUFFER_POOL_FULL:
+      return LOGICAL_RELATION_UNDO_BUFFER_POOL_FULL;
+
+    case RELATION_METADATA_OUT_OF_MEMORY:
+      return LOGICAL_RELATION_UNDO_OUT_OF_MEMORY;
+
+    case RELATION_METADATA_IO:
+      return LOGICAL_RELATION_UNDO_IO;
+    }
+
+    Tuple tuple = wal_iterator_get_tuple(uit, result.types);
+
+    PhysicalRelationIterator it = physical_relation_iterator(
+        pool, undo_entry.payload->tuple.relation_id, tuple.length, tuple.types);
+
+    PhysicalRelationIteratorStatus iterator_status =
+        physical_relation_iterator_open(&it, undo_entry.payload->tuple.block);
+
+    bool32 deleted = false;
+    if (iterator_status == PHYSICAL_RELATION_ITERATOR_STATUS_OK)
+    {
+      switch (lsn_cmp(
+          physical_relation_iterator_block_lsn(&it), entry->payload.undo.lsn))
+      {
+      case CMP_SMALLER:
+        break;
+
+      case CMP_EQUAL:
+      case CMP_GREATER:
+      {
+        while (iterator_status == PHYSICAL_RELATION_ITERATOR_STATUS_OK
+               && !deleted)
+        {
+          Tuple stored_tuple = physical_relation_iterator_get(&it);
+
+          bool32 delete = true;
+          for (ColumnsLength i = 0; i < tuple.length && delete; ++i)
+          {
+            delete = column_value_eq(
+                tuple.types[i],
+                tuple_get(stored_tuple, i),
+                tuple_get(tuple, i));
+          }
+
+          if (delete)
+          {
+            iterator_status =
+                physical_relation_iterator_delete(&it, uit->current);
+            deleted = true;
+          }
+          else
+          {
+            iterator_status = physical_relation_iterator_next_tuple(&it);
+          }
+        }
+      }
+      break;
+      }
+    }
+    physical_relation_iterator_close(&it);
+
+    deallocate_relation_metadata(&result);
+
+    switch (iterator_status)
+    {
+    case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
+      return LOGICAL_RELATION_UNDO_OK;
+
+    case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
+      if (deleted)
+      {
+        return LOGICAL_RELATION_UNDO_OK;
+      }
+      else
+      {
+        assert(false);
+        return LOGICAL_RELATION_UNDO_PROGRAM_ERROR;
+      }
+
+    case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+    case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
+      return LOGICAL_RELATION_UNDO_IO;
+
+    case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+      return LOGICAL_RELATION_UNDO_BUFFER_POOL_FULL;
+    }
+  }
+  break;
+
+  case WAL_ENTRY_DELETE_TUPLE:
+  {
+    RelationMetadataResult result = relation_metadata_from_id(
+        pool, undo_entry.payload->tuple.relation_id, false, false);
+
+    switch (result.error)
+    {
+    case RELATION_METADATA_OK:
+      break;
+
+    case RELATION_METADATA_RELATION_NOT_FOUND:
+    case RELATION_METADATA_PROGRAM_ERROR:
+      return LOGICAL_RELATION_UNDO_PROGRAM_ERROR;
+
+    case RELATION_METADATA_BUFFER_POOL_FULL:
+      return LOGICAL_RELATION_UNDO_BUFFER_POOL_FULL;
+
+    case RELATION_METADATA_OUT_OF_MEMORY:
+      return LOGICAL_RELATION_UNDO_OUT_OF_MEMORY;
+
+    case RELATION_METADATA_IO:
+      return LOGICAL_RELATION_UNDO_IO;
+    }
+
+    Tuple tuple = wal_iterator_get_tuple(uit, result.types);
+
+    PhysicalRelationIterator it = physical_relation_iterator(
+        pool, undo_entry.payload->tuple.relation_id, tuple.length, tuple.types);
+
+    PhysicalRelationIteratorStatus iterator_status =
+        physical_relation_iterator_open(&it, undo_entry.payload->tuple.block);
+
+    if (iterator_status == PHYSICAL_RELATION_ITERATOR_STATUS_OK)
+    {
+      switch (lsn_cmp(
+          physical_relation_iterator_block_lsn(&it), entry->payload.undo.lsn))
+      {
+      case CMP_SMALLER:
+        break;
+
+      case CMP_EQUAL:
+      case CMP_GREATER:
+      {
+        assert(physical_relation_iterator_insert_tuple_fits(&it, tuple));
+        physical_relation_iterator_insert(&it, uit->current, tuple);
+      }
+      break;
+      }
+    }
+    physical_relation_iterator_close(&it);
+
+    deallocate_relation_metadata(&result);
+
+    switch (iterator_status)
+    {
+    case PHYSICAL_RELATION_ITERATOR_STATUS_OK:
+      return LOGICAL_RELATION_UNDO_OK;
+
+    case PHYSICAL_RELATION_ITERATOR_STATUS_NO_MORE_BLOCKS:
+      assert(false);
+      return LOGICAL_RELATION_UNDO_PROGRAM_ERROR;
+
+    case PHYSICAL_RELATION_ITERATOR_STATUS_LOADING_PAGE:
+    case PHYSICAL_RELATION_ITERATOR_STATUS_IO:
+      return LOGICAL_RELATION_UNDO_IO;
+
+    case PHYSICAL_RELATION_ITERATOR_STATUS_BUFFER_POOL_FULL:
+      return LOGICAL_RELATION_UNDO_BUFFER_POOL_FULL;
+    }
+  }
+  break;
+  }
 }
 
 // ---------- Logical Relation ----------
@@ -1782,6 +2674,14 @@ QueryIteratorError query_iterator_new(
 
       case RELATION_METADATA_IO:
         status = QUERY_ITERATOR_READING_DISK;
+        break;
+
+      case RELATION_METADATA_PROGRAM_ERROR:
+        status = QUERY_ITERATOR_PROGRAM_ERROR;
+        break;
+
+      case RELATION_METADATA_BUFFER_POOL_FULL:
+        status = QUERY_ITERATOR_BUFFER_POOL_FULL;
         break;
       }
     }

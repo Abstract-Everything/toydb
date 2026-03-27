@@ -6,21 +6,35 @@
 #include <string.h>
 
 #define internal static
+#define global static
 
 #define UNUSED(v) (v == v)
+
+#define PACKED __attribute__((__packed__))
 
 #define STATIC_ASSERT(C) _Static_assert(C, "")
 
 #define KIBIBYTES(v) ((v) * 1024)
+#define MEBIBYTES(v) (1024 * KIBIBYTES(v))
 
 #define ARRAY_LENGTH(a) (sizeof(a) / sizeof(*(a)))
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
+#define DECIMAL_BASE 10
+
 typedef int32_t bool32;
 const bool32 false = 0;
 const bool32 true = 1;
+
+typedef uint8_t byte;
+
+typedef struct
+{
+  size_t length;
+  const void *data;
+} ByteSlice;
 
 internal void assert(bool32 condition)
 {
@@ -95,6 +109,26 @@ memory_copy_backward(void *destination, const void *source, size_t length)
   }
 }
 
+// TODO: Optimise
+// TODO Try using a macro to cover types
+internal bool32 memory_compare(const void *a, const void *b, size_t length)
+{
+  assert(a != NULL);
+  assert(b != NULL);
+
+  for (size_t i = 0; i < length; ++i)
+  {
+    const uint8_t *av = a + i;
+    const uint8_t *bv = b + i;
+    if (*av != *bv)
+    {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 // TODO: Use unsigned char instead of void
 internal AllocateError reallocate_update_length(
     size_t object_size, void **memory, size_t *length, size_t new_length)
@@ -129,6 +163,13 @@ reallocate(size_t object_size, void **memory, size_t length, size_t new_length)
   return reallocate_update_length(object_size, memory, &length, new_length);
 }
 
+typedef enum
+{
+  CMP_SMALLER,
+  CMP_EQUAL,
+  CMP_GREATER,
+} CompareRelation;
+
 // A string, unlike StringSlice, this owns the memory
 typedef struct
 {
@@ -142,6 +183,84 @@ typedef struct
   size_t length;
   const char *data;
 } StringSlice;
+
+typedef enum
+{
+  STRING_TO_INTEGER_OK,
+  STRING_TO_INTEGER_TOO_LARGE,
+  STRING_TO_INTEGER_INVALID_CHARACTER,
+} StringToIntegerError;
+
+typedef struct
+{
+  uint32_t integer;
+  StringToIntegerError error;
+} UInt32FromStringSliceResult;
+
+internal UInt32FromStringSliceResult
+uint32_from_string_slice(StringSlice string)
+{
+  uint32_t integer = 0;
+
+  for (size_t i = 0; i < string.length; ++i)
+  {
+    switch (string.data[i])
+    {
+    case '0':
+    case '1':
+    case '2':
+    case '3':
+    case '4':
+    case '5':
+    case '6':
+    case '7':
+    case '8':
+    case '9':
+    {
+      uint32_t delta = string.data[i] - '0';
+      if (integer > (UINT32_MAX / DECIMAL_BASE)
+          || delta > (UINT32_MAX / DECIMAL_BASE - integer))
+      {
+        return (UInt32FromStringSliceResult){
+            .error = STRING_TO_INTEGER_TOO_LARGE,
+        };
+      }
+
+      integer = (integer * DECIMAL_BASE) + string.data[i] - '0';
+    }
+    break;
+
+    default:
+      return (UInt32FromStringSliceResult){
+          .error = STRING_TO_INTEGER_INVALID_CHARACTER,
+      };
+    }
+  }
+
+  return (UInt32FromStringSliceResult){
+      .integer = integer,
+      .error = STRING_TO_INTEGER_OK,
+  };
+}
+
+size_t append_uint64_as_string(uint64_t number, char *string, size_t length)
+{
+  size_t divisor = 1;
+  for (; number / divisor >= DECIMAL_BASE; divisor *= DECIMAL_BASE) {}
+
+  size_t i = 0;
+  for (i = 0; divisor > 0 && i < length; ++i, divisor /= DECIMAL_BASE)
+  {
+    uint64_t remainder = number / divisor;
+    assert(remainder < DECIMAL_BASE);
+
+    number -= divisor * remainder;
+
+    string[i] = '0' + remainder;
+  }
+
+  return i;
+}
 
 internal AllocateError
 string_from_string_slice(StringSlice slice, String *string)
@@ -220,6 +339,47 @@ internal bool32 string_slice_prefix_eq(StringSlice string, StringSlice prefix)
   for (; i < prefix.length && string.data[i] == prefix.data[i]; ++i) {}
 
   return i == prefix.length;
+}
+
+typedef struct
+{
+  bool32 found;
+  StringSlice before;
+  StringSlice after;
+} StringSliceSplitResult;
+
+internal StringSliceSplitResult
+string_slice_split(StringSlice string, StringSlice delimiter)
+{
+  size_t i = 0;
+  for (; i < string.length; ++i)
+  {
+    if (string_slice_prefix_eq(
+            (StringSlice){
+                .data = string.data + i,
+                .length = string.length - 1,
+            },
+            delimiter))
+    {
+      break;
+    }
+  }
+
+  size_t offset_to_after = MIN(i + delimiter.length, string.length);
+
+  return (StringSliceSplitResult){
+      .found = i != string.length,
+      .before =
+          {
+              .data = string.data,
+              .length = i,
+          },
+      .after =
+          {
+              .data = string.data + offset_to_after,
+              .length = string.length - offset_to_after,
+          },
+  };
 }
 
 // Returns a StringSlice past the specified character, if the character is not

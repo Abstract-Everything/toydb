@@ -250,7 +250,7 @@ typedef struct
   LinuxReadError error;
 } LinuxReadResult;
 
-LinuxReadResult linux_read(int fd, unsigned char *data, size_t length)
+LinuxReadResult linux_read(int fd, void *data, size_t length)
 {
   ssize_t count = syscall(SYS_read, fd, data, length);
 
@@ -323,7 +323,7 @@ typedef struct
   LinuxWriteError error;
 } LinuxWriteResult;
 
-LinuxWriteResult linux_write(int fd, const unsigned char *data, size_t length)
+LinuxWriteResult linux_write(int fd, const void *data, size_t length)
 {
   ssize_t count = syscall(SYS_write, fd, data, length);
 
@@ -712,6 +712,159 @@ LinuxFStatResult linux_fstat(int fd)
 
   return (LinuxFStatResult){
       .stat = stat,
+      .error = error,
+  };
+}
+
+typedef enum
+{
+  LINUX_RENAME_OK,
+  LINUX_RENAME_ACCESS,
+  LINUX_RENAME_BUSY,
+  LINUX_RENAME_QUOTA,
+  LINUX_RENAME_FAULT,
+  LINUX_RENAME_INVALID,
+  LINUX_RENAME_IS_DIRECTORY,
+  LINUX_RENAME_TOO_MANY_SYMBOLIC_LINKS,
+  LINUX_RENAME_LINK,
+  LINUX_RENAME_NAME_TOO_LONG,
+  LINUX_RENAME_NO_ENTRY,
+  LINUX_RENAME_NO_MEMORY,
+  LINUX_RENAME_NO_SPACE,
+  LINUX_RENAME_NOT_DIRECTORY,
+  LINUX_RENAME_EXISTS,
+  LINUX_RENAME_READ_ONLY_FILESYSTEM,
+  LINUX_RENAME_DIFFERENT_FILESYSTEM,
+  LINUX_RENAME_UNKNOWN,
+} LinuxRenameError;
+
+LinuxRenameError linux_rename(const char *from, const char *to)
+{
+  if (syscall(SYS_rename, from, to) < 0)
+  {
+    switch (errno)
+    {
+    case EACCES:
+    case EPERM:
+      return LINUX_RENAME_ACCESS;
+
+    case EBUSY:
+      return LINUX_RENAME_BUSY;
+
+    case EDQUOT:
+      return LINUX_RENAME_QUOTA;
+
+    case EFAULT:
+      return LINUX_RENAME_FAULT;
+
+    case EINVAL:
+      return LINUX_RENAME_INVALID;
+
+    case EISDIR:
+      return LINUX_RENAME_IS_DIRECTORY;
+
+    case ELOOP:
+      return LINUX_RENAME_TOO_MANY_SYMBOLIC_LINKS;
+
+    case EMLINK:
+      return LINUX_RENAME_LINK;
+
+    case ENAMETOOLONG:
+      return LINUX_RENAME_NAME_TOO_LONG;
+
+    case ENOENT:
+      return LINUX_RENAME_NO_ENTRY;
+
+    case ENOMEM:
+      return LINUX_RENAME_NO_MEMORY;
+
+    case ENOSPC:
+      return LINUX_RENAME_NO_SPACE;
+
+    case ENOTDIR:
+      return LINUX_RENAME_NOT_DIRECTORY;
+
+    case ENOTEMPTY:
+    case EEXIST:
+      return LINUX_RENAME_EXISTS;
+
+    case EROFS:
+      return LINUX_RENAME_READ_ONLY_FILESYSTEM;
+
+    case EXDEV:
+      return LINUX_RENAME_DIFFERENT_FILESYSTEM;
+
+    default:
+      return LINUX_RENAME_UNKNOWN;
+    }
+  }
+
+  return LINUX_RENAME_OK;
+}
+
+struct linux_dirent64
+{
+  ino64_t d_ino;           /* 64-bit inode number */
+  off64_t d_off;           /* Not an offset; see getdents() */
+  unsigned short d_reclen; /* Size of this dirent */
+  unsigned char d_type;    /* File type */
+  char d_name[];           /* Filename (null-terminated) */
+};
+
+typedef enum
+{
+  LINUX_GET_DIRECTORY_ENTRIES_OK,
+  LINUX_GET_DIRECTORY_ENTRIES_BAD_FD,
+  LINUX_GET_DIRECTORY_ENTRIES_FAULT,
+  LINUX_GET_DIRECTORY_ENTRIES_INVALID,
+  LINUX_GET_DIRECTORY_ENTRIES_NO_ENTRY,
+  LINUX_GET_DIRECTORY_ENTRIES_NOT_A_DIRECTORY,
+  LINUX_GET_DIRECTORY_ENTRIES_UNKNOWN,
+} LinuxGetDirectoryEntriesError;
+
+typedef struct
+{
+  int read;
+  LinuxGetDirectoryEntriesError error;
+} LinuxGetDirectoryEntriesResult;
+
+LinuxGetDirectoryEntriesResult
+linux_get_directory_entries(int fd, void *buffer, size_t length)
+{
+  LinuxGetDirectoryEntriesError error = LINUX_GET_DIRECTORY_ENTRIES_OK;
+  int read = syscall(SYS_getdents64, fd, buffer, length);
+  if (read < 0)
+  {
+    switch (errno)
+    {
+    case EBADF:
+      error = LINUX_GET_DIRECTORY_ENTRIES_BAD_FD;
+      break;
+
+    case EFAULT:
+      error = LINUX_GET_DIRECTORY_ENTRIES_FAULT;
+      break;
+
+    case EINVAL:
+      error = LINUX_GET_DIRECTORY_ENTRIES_INVALID;
+      break;
+
+    case ENOENT:
+      error = LINUX_GET_DIRECTORY_ENTRIES_NO_ENTRY;
+      break;
+
+    case ENOTDIR:
+      error = LINUX_GET_DIRECTORY_ENTRIES_NOT_A_DIRECTORY;
+      break;
+
+    default:
+      error = LINUX_GET_DIRECTORY_ENTRIES_UNKNOWN;
+      break;
+    }
+  }
+
+  return (LinuxGetDirectoryEntriesResult){
+      .read = read,
       .error = error,
   };
 }
