@@ -1602,6 +1602,23 @@ size_t modified_buffers_count(Database *db, MappedBufferStatus buffer_status)
   return count;
 }
 
+Database create_test_db(
+    char *path, size_t path_length, void *memory, size_t memory_length)
+{
+  find_empty_path(path, path_length);
+  Database db = {};
+  assert(database_new(&db, string_slice_from_ptr(path), memory, memory_length));
+  return db;
+}
+
+Database
+create_test_db_existing_path(char *path, void *memory, size_t memory_length)
+{
+  Database db = {};
+  assert(database_new(&db, string_slice_from_ptr(path), memory, memory_length));
+  return db;
+}
+
 void test_operations()
 {
   char path[LINUX_PATH_MAX];
@@ -1654,9 +1671,7 @@ void test_operations()
   STATIC_ASSERT(3 * table_tuple_length == ARRAY_LENGTH(table_values));
 
   { // Creating a new table
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     assert_database_create_table(
         &db,
@@ -1713,9 +1728,7 @@ void test_operations()
   }
 
   { // Creating two tables with the same name
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     assert_database_create_table(
         &db,
@@ -1738,9 +1751,7 @@ void test_operations()
   }
 
   { // Creating two tables with the same name
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     database_start_transaction(&db);
     DatabaseCreateError result = database_create_table(
@@ -1789,9 +1800,7 @@ void test_operations()
   // }
 
   { // Creating two tables
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     assert_database_create_table(
         &db,
@@ -1873,9 +1882,7 @@ void test_operations()
   }
 
   { // Aborting creation of table
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     assert_database_create_table(
         &db,
@@ -1942,9 +1949,7 @@ void test_operations()
   }
 
   { // Inserting tuples primary key absent
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     assert_database_create_table(
         &db,
@@ -1972,9 +1977,7 @@ void test_operations()
   }
 
   { // Inserting tuples
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     assert_database_create_table(
         &db,
@@ -2000,9 +2003,7 @@ void test_operations()
   }
 
   { // Aborting Inserting tuples
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     assert_database_create_table(
         &db,
@@ -2051,9 +2052,7 @@ void test_operations()
   }
 
   { // Deleting tuples
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     assert_database_create_table(
         &db,
@@ -2082,9 +2081,7 @@ void test_operations()
   }
 
   { // Aborting deleting tuples
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     assert_database_create_table(
         &db,
@@ -2142,9 +2139,7 @@ void test_operations()
   }
 
   { // Dropping table
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     assert_database_create_table(
         &db,
@@ -2209,9 +2204,7 @@ void test_operations()
   }
 
   { // Aborting Dropping table
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     assert_database_create_table(
         &db,
@@ -2253,9 +2246,7 @@ void test_operations()
   }
 
   { // Test without saving WAL buffers are not synced
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     database_start_transaction(&db);
     DatabaseCreateError result = database_create_table(
@@ -2277,9 +2268,7 @@ void test_operations()
   }
 
   { // Test Saving Wal allows buffers to be synced
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     database_start_transaction(&db);
     DatabaseCreateError result = database_create_table(
@@ -2304,9 +2293,7 @@ void test_operations()
   }
 
   { // Test buffers with lsns ahead of the persisted lsns are not saved
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     database_start_transaction(&db);
     DatabaseCreateError create_result = database_create_table(
@@ -2370,9 +2357,7 @@ void test_operations()
   assert(allocate(&recover_memory, recover_memory_length) == ALLOCATE_OK);
 
   { // Test recovery of empty log
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     LogSequenceNumber last_entry_lsn = db.log.last_entry_lsn;
 
@@ -2388,9 +2373,7 @@ void test_operations()
   }
 
   { // Test recovery of start entry
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
     database_start_transaction(&db);
 
     LogSequenceNumber last_entry_lsn = db.log.last_entry_lsn;
@@ -2409,9 +2392,7 @@ void test_operations()
   }
 
   { // Test recovery of commited changes
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     database_start_transaction(&db);
 
@@ -2445,9 +2426,8 @@ void test_operations()
 
     disk_buffer_pool_save(&db.pool, &db.log);
 
-    Database db_recover = {};
-    assert(database_new(
-        &db_recover, string_slice_from_ptr(path), second_data, memory_length));
+    Database db_recover =
+        create_test_db_existing_path(path, second_data, memory_length);
 
     assert(
         lsn_cmp(db.log.next_entry_lsn, db_recover.log.next_entry_lsn)
@@ -2471,9 +2451,7 @@ void test_operations()
   }
 
   { // Test recovery of committed changes with unsaved buffers
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     database_start_transaction(&db);
 
@@ -2505,9 +2483,8 @@ void test_operations()
     }
     database_commit_transaction(&db);
 
-    Database db_recover = {};
-    assert(database_new(
-        &db_recover, string_slice_from_ptr(path), second_data, memory_length));
+    Database db_recover =
+        create_test_db_existing_path(path, second_data, memory_length);
 
     assert(
         lsn_cmp(db.log.next_entry_lsn, db_recover.log.next_entry_lsn)
@@ -2531,9 +2508,7 @@ void test_operations()
   }
 
   { // Test recovery of uncommitted changes aborts transaction
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     database_start_transaction(&db);
 
@@ -2549,9 +2524,8 @@ void test_operations()
 
     wal_sync(&db.log);
 
-    Database db_recover = {};
-    assert(database_new(
-        &db_recover, string_slice_from_ptr(path), second_data, memory_length));
+    Database db_recover =
+        create_test_db_existing_path(path, second_data, memory_length);
 
     assert(
         lsn_cmp(db.log.next_entry_lsn, db_recover.log.next_entry_lsn)
@@ -2583,9 +2557,7 @@ void test_operations()
   }
 
   { // Test recovery of uncommitted changes aborts transaction
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     database_start_transaction(&db);
 
@@ -2602,9 +2574,8 @@ void test_operations()
     wal_sync(&db.log);
     disk_buffer_pool_save(&db.pool, &db.log);
 
-    Database db_recover = {};
-    assert(database_new(
-        &db_recover, string_slice_from_ptr(path), second_data, memory_length));
+    Database db_recover =
+        create_test_db_existing_path(path, second_data, memory_length);
 
     assert(
         lsn_cmp(db.log.next_entry_lsn, db_recover.log.next_entry_lsn)
@@ -2636,9 +2607,7 @@ void test_operations()
   }
 
   { // Test recovery of partially written undo
-    find_empty_path(path, ARRAY_LENGTH(path));
-    Database db = {};
-    assert(database_new(&db, string_slice_from_ptr(path), data, memory_length));
+    Database db = create_test_db(path, ARRAY_LENGTH(path), data, memory_length);
 
     database_start_transaction(&db);
 
@@ -2681,9 +2650,8 @@ void test_operations()
 
     disk_buffer_pool_save(&db.pool, &db.log);
 
-    Database db_recover = {};
-    assert(database_new(
-        &db_recover, string_slice_from_ptr(path), second_data, memory_length));
+    Database db_recover =
+        create_test_db_existing_path(path, second_data, memory_length);
 
     assert(
         lsn_cmp(db.log.next_entry_lsn, db_recover.log.next_entry_lsn)
