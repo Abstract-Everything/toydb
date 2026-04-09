@@ -68,9 +68,9 @@ Implement some constraints on tuples inside relations
 
 ### Tuple iterator
 
-\[x\] An iterator structure which fetches tuples one by one on an as needed basis.
-This makes sure that as few rows are present in memory at once instead of the whole relation.
-The iterator structure also supports applying relational operators which returns a tuple after applying all the operations.
+- \[x\] An iterator structure which fetches tuples one by one on an as needed basis.
+  This makes sure that as few rows are present in memory at once instead of the whole relation.
+  The iterator structure also supports applying relational operators which returns a tuple after applying all the operations.
 
 ### Sql parser
 
