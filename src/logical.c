@@ -2779,6 +2779,8 @@ void query_iterator_destroy(QueryIterator *it)
   {
     tuple_iterator_destroy(&it->iterators[i]);
   }
+
+  deallocate(it->iterators, sizeof(TupleIterator) * it->length);
 }
 
 QueryIteratorStartResult query_iterator_start(QueryIterator *query_it)

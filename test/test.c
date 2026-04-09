@@ -2691,6 +2691,7 @@ void test_operations()
         NULL);
   }
 
+  free(recover_memory);
   free(second_data);
   free(data);
 }

@@ -11,6 +11,7 @@ bear --output "$SCRIPT_DIR/compile_commands.json" -- \
 	-I "$SCRIPT_DIR/std" \
 	-I "$SCRIPT_DIR/src" \
 	-O0 \
+	-fsanitize=address \
 	-g \
 	"$SCRIPT_DIR/test/test.c" \
 	-o "$SCRIPT_DIR/build/test"
